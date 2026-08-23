@@ -1,0 +1,10 @@
+# --- Production dependencies (installed by Render) ---
+fastapi>=0.115
+uvicorn>=0.30
+python-multipart>=0.0.9   # multipart/form-data (photo upload)
+google-genai>=1.0         # Gemini Vision answer-key extraction
+
+# --- Development / test only (not required for deployment) ---
+pydantic>=2.7             # also pulled in by fastapi; pinned for local dev parity
+pytest>=8.0
+httpx>=0.27               # fastapi.testclient
