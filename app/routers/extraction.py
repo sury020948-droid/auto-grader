@@ -1,17 +1,21 @@
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, File, Form, Path, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Path, UploadFile
 
 from .. import db as dal
 from ..config import ALLOWED_IMAGE_TYPES
 from ..db import get_conn
-from ..errors import AppError
+from ..deps import get_current_user
+from ..errors import AppError, GeminiUnavailableError
 from ..schemas import ExtractTextPayload, SectionImport
 from ..services import gemini, parser, segmenter
 from ..services.conflicts import detect_conflicts
 from ..services.normalizer import normalize_answer
+from .settings import resolve_user_key
 
 router = APIRouter(tags=["extraction"])
+
+ID = Annotated[int, Path(ge=1, le=2**63 - 1)]
 
 
 def _build_preview(
@@ -43,8 +47,8 @@ def _build_preview(
     return out
 
 
-def _gemini_preview(data: bytes, content_type: str):
-    result = gemini.extract_answer_key(data, content_type)
+def _gemini_preview(data: bytes, content_type: str, api_key: str):
+    result = gemini.extract_answer_key(data, content_type, api_key=api_key)
     entries = [
         {
             "number": e["number"],
@@ -74,12 +78,32 @@ def _gemini_preview(data: bytes, content_type: str):
 async def extract(
     file: UploadFile | None = File(default=None),
     raw_text: str | None = Form(default=None),
+    x_gemini_api_key: Annotated[str | None, Header()] = None,
+    user: dict = Depends(get_current_user),
+    conn=Depends(get_conn),
 ):
     if file is not None and file.filename:
         if file.content_type not in ALLOWED_IMAGE_TYPES:
             raise AppError(415, "지원하지 않는 파일 형식입니다. JPG/PNG를 업로드해 주세요.")
         data = await file.read()
-        return _gemini_preview(data, file.content_type or "")
+        key = resolve_user_key(user, conn, header_key=x_gemini_api_key)
+        if not key:
+            raise GeminiUnavailableError()
+        try:
+            return _gemini_preview(data, file.content_type or "", key)
+        except GeminiUnavailableError:
+            raise
+        except AppError:
+            raise
+        except Exception as exc:  # wrong personal key -> clear auth-style error
+            msg = str(exc)
+            if "API key not valid" in msg or "API_KEY_INVALID" in msg:
+                raise AppError(
+                    401,
+                    "Gemini API 키가 유효하지 않습니다. 설정 화면에서 'AIza'로 시작하는"
+                    " 올바른 키를 등록해 주세요.",
+                ) from exc
+            raise
     if raw_text is not None and raw_text.strip():
         return _paste_preview(raw_text)
     raise AppError(400, "사진 또는 텍스트 중 하나는 필요합니다.")
@@ -101,9 +125,7 @@ def extract_text_json(payload: ExtractTextPayload):
     return _paste_preview(payload.raw_text)
 
 
-def _group_incoming(
-    payload: SectionImport,
-) -> list[dict[str, Any]]:
+def _group_incoming(payload: SectionImport) -> list[dict[str, Any]]:
     """Segment the payload into incoming groups (label + numbers) for
     conflict checks — mirrors segmenter.build_groups but without DB access."""
     entries = [e.model_dump() for e in payload.entries]
@@ -126,50 +148,64 @@ def _group_incoming(
 
 @router.post("/workbooks/{wid}/sections/conflicts")
 def check_conflicts(
-    wid: Annotated[int, Path(ge=1, le=2**63 - 1)],
+    wid: ID,
     payload: SectionImport,
+    user: dict = Depends(get_current_user),
     conn=Depends(get_conn),
 ):
     """Detect existing sessions that collide with the incoming answer key."""
-    wb = conn.execute("SELECT id FROM workbooks WHERE id = ?", (wid,)).fetchone()
+    uid = int(user["id"])
+    wb = conn.execute(
+        "SELECT id FROM workbooks WHERE id = ? AND user_id = ?", (wid, uid)
+    ).fetchone()
     if not wb:
-        raise AppError(404, "워크북을 찾을 수 없습니다.")
+        raise HTTPException(status_code=404, detail="워크북을 찾을 수 없습니다.")
     conflicts = detect_conflicts(
-        dal.list_section_numbers(conn, wid), _group_incoming(payload)
+        dal.list_section_numbers(conn, wid, uid),
+        _group_incoming(payload),
     )
     return {"conflicts": conflicts}
 
 
-def _resolve_label_conflicts(
-    conn, wid: int, label: str, res_map: dict[str, Any]
-) -> tuple[str | None, int | None]:
+def _resolve_label_conflicts(conn, uid, wid, label, res_map):
     """Return (final_label, overwrite_target_id) for one incoming group."""
     res = res_map.get(label)
     if res is None:
         return label, None
     if res.action == "skip_incoming":
         return None, None
+
     if res.action == "overwrite":
         target_id = res.target_section_id
         if target_id is not None:
             target = conn.execute(
-                "SELECT id FROM sections WHERE id = ? AND workbook_id = ?",
-                (target_id, wid),
+                """
+                SELECT s.id FROM sections s JOIN workbooks w ON w.id = s.workbook_id
+                WHERE s.id = ? AND w.user_id = ?
+                """,
+                (target_id, uid),
             ).fetchone()
             if not target:
                 raise AppError(404, f"'{label}'과(와) 충돌한 기존 섹션을 찾을 수 없습니다.")
             return label, int(target_id)
         return label, None  # fall through to plain append when target missing
     # keep_both: rename the incoming version so both survive
-    return dal.next_unique_label(conn, wid, label), None
+    return dal.next_unique_label(conn, wid, uid, label), None
 
 
 @router.post("/workbooks/{wid}/sections/import", status_code=201)
 def import_sections(
-    wid: Annotated[int, Path(ge=1, le=2**63 - 1)], payload: SectionImport, conn=Depends(get_conn)):
-    wb = conn.execute("SELECT id FROM workbooks WHERE id = ?", (wid,)).fetchone()
+    wid: ID,
+    payload: SectionImport,
+    user: dict = Depends(get_current_user),
+    conn=Depends(get_conn),
+):
+    uid = int(user["id"])
+    wb = conn.execute(
+        "SELECT id FROM workbooks WHERE id = ? AND user_id = ?", (wid, uid)
+    ).fetchone()
     if not wb:
-        raise AppError(404, "워크북을 찾을 수 없습니다.")
+        raise HTTPException(status_code=404, detail="워크북을 찾을 수 없습니다.")
 
     entries = [e.model_dump() for e in payload.entries]
     headers = [h.model_dump() for h in payload.headers]
@@ -190,8 +226,12 @@ def import_sections(
         raise AppError(422, "저장할 정답 데이터가 없습니다.")
 
     max_pos_row = conn.execute(
-        "SELECT COALESCE(MAX(position), -1) AS p FROM sections WHERE workbook_id = ?",
-        (wid,),
+        """
+        SELECT COALESCE(MAX(s.position), -1) AS p FROM sections s
+        JOIN workbooks w ON w.id = s.workbook_id
+        WHERE s.workbook_id = ? AND w.user_id = ?
+        """,
+        (wid, uid),
     ).fetchone()
     next_pos = int(max_pos_row["p"]) + 1
 
@@ -200,7 +240,7 @@ def import_sections(
     for g in groups:
         raw_label = str(g["label"])
         final_label, overwrite_sid = _resolve_label_conflicts(
-            conn, wid, raw_label, res_map
+            conn, uid, wid, raw_label, res_map
         )
         if final_label is None:  # skip_incoming
             continue
@@ -224,18 +264,19 @@ def import_sections(
 
         did_overwrite = False
         if overwrite_sid is not None and overwrite_sid not in used_overwrite_targets:
-            dal.replace_section_keys(conn, overwrite_sid, final_label, items)
+            dal.replace_section_keys(conn, uid, overwrite_sid, final_label, items)
             sid = overwrite_sid
             used_overwrite_targets.add(sid)
             did_overwrite = True
         else:
             cur = conn.execute(
-                "INSERT INTO sections(workbook_id, label, position) VALUES (?, ?, ?)",
-                (wid, final_label, next_pos),
+                "INSERT INTO sections(user_id, workbook_id, label, position)"
+                " VALUES (?, ?, ?, ?)",
+                (uid, wid, final_label, next_pos),
             )
             next_pos += 1
             sid = int(cur.lastrowid)
-            dal.insert_keys(conn, sid, items)
+            dal.insert_keys(conn, uid, sid, items)
 
         sections.append(
             {

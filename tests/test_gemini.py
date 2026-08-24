@@ -45,7 +45,7 @@ def _patch(monkeypatch, models, model="gemini-test", key="k"):
     monkeypatch.setattr(config, "GEMINI_API_KEY", key)
     monkeypatch.setattr(config, "GEMINI_MODEL", model)
     monkeypatch.setattr(config, "GEMINI_MAX_RETRIES", 2)
-    monkeypatch.setattr(gemini, "_client", lambda: FakeClient(models))
+    monkeypatch.setattr(gemini, "_client", lambda key: FakeClient(models))
     monkeypatch.setattr(gemini.time, "sleep", lambda s: None)
 
 

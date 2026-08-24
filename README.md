@@ -45,7 +45,9 @@ API 키는 **앱 내 설정(오른쪽 위 칩 클릭)** 또는 환경 변수 중
 
 | 변수 | 기본값 | 설명 |
 |---|---|---|
-| `GEMINI_API_KEY` | — (또는 `GOOGLE_API_KEY`) | Gemini API 키. 앱 화면에서 등록하면 `data/settings.json`에 저장되고 환경 변수보다 우선합니다. 둘 다 없으면 사진 경로 503 |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | — (둘 다 필요) | 설정 시 Google OAuth 로그인 활성화 + 사용자별 데이터 격리. 미설정 시 로컬 모드(단일 공유 사용자, 화면에 경고 표시) |
+| `SESSION_SECRET` | 자동 생성 | 로그인 토큰 서명 키. 다중 인스턴스 배포 시 동일 값 설정 권장 |
+| `GEMINI_API_KEY` | — (또는 `GOOGLE_API_KEY`) | 서버 전체 폴백 키. 각 사용자는 설정 화면에서 자신의 키(`AIza...`로 시작)를 등록하며, 등록된 개인 키가 우선합니다. 요청 헤더 `X-Gemini-API-Key`로도 일회 대체 가능 |
 | `GEMINI_MODEL` | `gemini-3.6-flash` | 사용할 Gemini 비전 모델 |
 | `GEMINI_TIMEOUT_SECS` | `60` | API 호출 타임아웃(초) |
 | `GEMINI_MAX_RETRIES` | `2` | 일시적 오류 재시도 횟수 |

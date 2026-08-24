@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path
 
 from .. import db as dal
 from ..db import get_conn
+from ..deps import get_current_user
 from ..errors import AppError
 from ..schemas import AttemptCreate, FromMissesPayload
 from ..services.grader import grade
@@ -14,8 +15,8 @@ router = APIRouter(tags=["attempts"])
 ID = Annotated[int, Path(ge=1, le=2**63 - 1)]
 
 
-def _require_section(conn, sid: int) -> dict[str, Any]:
-    sec = dal.get_section(conn, sid)
+def _require_section(conn, sid: int, uid: int) -> dict[str, Any]:
+    sec = dal.get_section(conn, sid, uid)
     if not sec:
         raise HTTPException(status_code=404, detail="섹션을 찾을 수 없습니다.")
     return sec
@@ -63,14 +64,20 @@ def _merged_answers(
 
 
 @router.post("/attempts", status_code=201)
-def create_attempt(payload: AttemptCreate, conn=Depends(get_conn)):
-    _require_section(conn, payload.section_id)
+def create_attempt(
+    payload: AttemptCreate,
+    user: dict = Depends(get_current_user),
+    conn=Depends(get_conn),
+):
+    uid = int(user["id"])
+    _require_section(conn, payload.section_id, uid)
 
     if payload.merge_attempt_id is not None:
-        base = dal.get_attempt(conn, payload.merge_attempt_id)
+        base = dal.get_attempt(conn, payload.merge_attempt_id, uid)
         if not base:
             raise HTTPException(
-                status_code=404, detail="병합할 이전 채점 기록을 찾을 수 없습니다."
+                status_code=404,
+                detail="병합할 이전 채점 기록을 찾을 수 없습니다.",
             )
         if base["section_id"] != payload.section_id:
             raise AppError(
@@ -80,19 +87,20 @@ def create_attempt(payload: AttemptCreate, conn=Depends(get_conn)):
     else:
         effective = dict(payload.answers)
 
-    keys = dal.get_keys(conn, payload.section_id)
+    keys = dal.get_keys(conn, payload.section_id, uid)
     keys_canonical = {n: c for n, (c, _) in keys.items()}
     keys_display = {n: d for n, (_, d) in keys.items()}
     graded = grade(keys_canonical, keys_display, effective)
     aid = dal.create_attempt(
         conn,
+        uid,
         payload.section_id,
         graded["score"],
         graded["total"],
         graded["percent"],
         graded["results"],
     )
-    saved = dal.get_attempt(conn, aid)
+    saved = dal.get_attempt(conn, aid, uid)
     out = _serialize_attempt(saved)
     if payload.merge_attempt_id is not None:
         out["merged_from"] = payload.merge_attempt_id
@@ -102,28 +110,40 @@ def create_attempt(payload: AttemptCreate, conn=Depends(get_conn)):
 
 
 @router.get("/sections/{sid}/attempts")
-def read_attempts(sid: ID, conn=Depends(get_conn)):
-    _require_section(conn, sid)
-    return dal.list_attempts(conn, sid)
+def read_attempts(
+    sid: ID,
+    user: dict = Depends(get_current_user),
+    conn=Depends(get_conn),
+):
+    _require_section(conn, sid, int(user["id"]))
+    return dal.list_attempts(conn, sid, int(user["id"]))
 
 
 @router.get("/attempts/{aid}")
-def read_attempt(aid: ID, conn=Depends(get_conn)):
-    att = dal.get_attempt(conn, aid)
+def read_attempt(
+    aid: ID, user: dict = Depends(get_current_user), conn=Depends(get_conn)
+):
+    att = dal.get_attempt(conn, aid, int(user["id"]))
     if not att:
         raise HTTPException(status_code=404, detail="채점 기록을 찾을 수 없습니다.")
     return _serialize_attempt(att)
 
 
 @router.delete("/attempts/{aid}", status_code=204)
-def remove_attempt(aid: ID, conn=Depends(get_conn)):
-    if not dal.delete_attempt(conn, aid):
+def remove_attempt(
+    aid: ID, user: dict = Depends(get_current_user), conn=Depends(get_conn)
+):
+    if not dal.delete_attempt(conn, aid, int(user["id"])):
         raise HTTPException(status_code=404, detail="채점 기록을 찾을 수 없습니다.")
 
 
 @router.post("/attempts/from-misses", status_code=201)
-def retry_misses(payload: FromMissesPayload, conn=Depends(get_conn)):
-    att = dal.get_attempt(conn, payload.attempt_id)
+def retry_misses(
+    payload: FromMissesPayload,
+    user: dict = Depends(get_current_user),
+    conn=Depends(get_conn),
+):
+    att = dal.get_attempt(conn, payload.attempt_id, int(user["id"]))
     if not att:
         raise HTTPException(status_code=404, detail="채점 기록을 찾을 수 없습니다.")
     numbers = [r["number"] for r in att["results"] if r["status"] != "correct"]

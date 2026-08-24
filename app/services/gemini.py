@@ -87,21 +87,21 @@ _FENCE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$")
 _MAX_NUMBER = 999
 
 
-def available() -> bool:
-    return bool(config.GEMINI_API_KEY)
+def available(api_key: str | None = None) -> bool:
+    return bool(api_key if api_key is not None else config.GEMINI_API_KEY)
 
 
-def _client():
+def _client(api_key: str):
     try:
         from google import genai
     except ImportError as exc:  # pragma: no cover - dependency missing
         raise GeminiUnavailableError(
             "google-genai 패키지가 설치되지 않았습니다. pip install google-genai"
         ) from exc
-    if not config.GEMINI_API_KEY:
+    if not api_key:
         raise GeminiUnavailableError()
     return genai.Client(
-        api_key=config.GEMINI_API_KEY,
+        api_key=api_key,
         http_options={"timeout": int(config.GEMINI_TIMEOUT_SECS * 1000)},
     )
 
@@ -231,9 +231,18 @@ def validate_entries(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], lis
     return (groups[0]["entries"], notes) if groups else ([], notes)
 
 
-def extract_answer_key(image_bytes: bytes, content_type: str) -> dict[str, Any]:
-    """Send the photo to Gemini Vision and return validated semantic groups."""
-    if not config.GEMINI_API_KEY:
+def extract_answer_key(
+    image_bytes: bytes,
+    content_type: str,
+    api_key: str | None = None,
+) -> dict[str, Any]:
+    """Send the photo to Gemini Vision and return validated semantic groups.
+
+    `api_key` (the requester's own key) takes precedence over the server-wide
+    env fallback so usage is isolated per user.
+    """
+    key = api_key if api_key is not None else config.GEMINI_API_KEY
+    if not key:
         raise GeminiUnavailableError()
     if len(image_bytes) == 0:
         raise GeminiResponseError("빈 파일입니다.")
@@ -243,7 +252,7 @@ def extract_answer_key(image_bytes: bytes, content_type: str) -> dict[str, Any]:
 
     from google.genai import types
 
-    client = _client()
+    client = _client(key)
     contents = [
         types.Part.from_bytes(data=image_bytes, mime_type=mime),
         "Read this workbook answer key photo, segment it by its printed "

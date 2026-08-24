@@ -6,4 +6,6 @@ ignore = ["RUF001", "RUF002", "RUF003"]
 
 [lint.per-file-ignores]
 "app/routers/*" = ["B008"]
+"app/deps.py" = ["B008"]
+"app/main.py" = ["B008"]
 "app/services/gemini.py" = ["BLE001"]

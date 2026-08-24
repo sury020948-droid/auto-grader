@@ -1,6 +1,30 @@
-# REST API Contract v1.0
+# REST API Contract v2.0
 
 Base URL: `http://<host>:8000` · All bodies JSON unless noted. Errors: `{ "detail": string }` with proper HTTP codes.
+
+## Authentication
+
+When `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` are configured, every `/api/*`
+endpoint (except the auth ones) requires `Authorization: Bearer <token>`.
+Tokens are issued by the Google OAuth flow; without OAuth config the app runs
+in single-user LOCAL mode (shared 'local' user, no token required).
+
+- `GET /api/auth/config` → `{ "oauth_enabled": bool }`
+- `GET /api/auth/me` → current user `{ id, email, name, picture, oauth_enabled }`
+- `GET /api/auth/google/start?origin=<frontend-origin>` → 307 to Google consent
+  (state cookie set); callback returns to `origin/#token=<jwt-like-hmac>`
+- `GET /api/auth/google/callback` → validates state + code, upserts user, redirects
+  with token (or `#auth=failed`)
+- `POST /api/auth/dev-token` → local-mode only: `{ "token", "user" }`
+
+All workbook/section/attempt data is strictly scoped to the requesting user.
+
+## Gemini API key resolution (photo extraction)
+
+Precedence per request:
+1. `X-Gemini-API-Key` request header (must start with `AIza`)
+2. The authenticated user's saved key (`/api/settings/api-key`)
+3. Server-wide env fallback (`GEMINI_API_KEY`/`GOOGLE_API_KEY`)
 
 ## Objects
 

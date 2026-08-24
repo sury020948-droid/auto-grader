@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -16,24 +18,30 @@ class TestApiKeyStatus:
         assert r.status_code == 200
         assert r.json() == {"set": False, "source": None, "masked": None}
 
-    def test_env_only_reports_env_source(self, client, monkeypatch):
+    def test_env_only_reports_server_source(self, client, monkeypatch):
         monkeypatch.setenv("GEMINI_API_KEY", FULL_KEY)
-        from app.main import create_app
-
-        with TestClient(create_app()) as c:
-            data = c.get("/api/settings/api-key").json()
+        data = client.get("/api/settings/api-key").json()
         assert data["set"] is True
-        assert data["source"] == "env"
+        assert data["source"] == "server"
         assert FULL_KEY not in str(data)
 
 
 class TestSaveApiKey:
     def test_save_and_status(self, client):
-        r = client.post("/api/settings/api-key", json={"api_key": f"  {FULL_KEY}  "})
+        r = client.post(
+            "/api/settings/api-key", json={"api_key": f"  {FULL_KEY}  "}
+        )
         assert r.status_code == 200
         data = r.json()
-        assert data == {"set": True, "source": "app", "masked": "AIzaSy...cdef"}
+        assert data == {"set": True, "source": "user", "masked": "AIzaSy...cdef"}
         assert FULL_KEY not in str(data)
+
+    def test_user_key_beats_server_env(self, client, monkeypatch):
+        monkeypatch.setenv("GEMINI_API_KEY", "AIzaSyD-server-wide-fallback-key")
+        client.post("/api/settings/api-key", json={"api_key": FULL_KEY})
+        data = client.get("/api/settings/api-key").json()
+        assert data["source"] == "user"
+        assert "cdef" in data["masked"]
 
     def test_health_reflects_saved_key(self, client):
         before = client.get("/api/health").json()
@@ -43,10 +51,25 @@ class TestSaveApiKey:
         assert after["gemini_available"] is True
 
     def test_saved_key_used_by_extract(self, client, monkeypatch):
+        payload = {
+            "workbook_title": "",
+            "groups": [
+                {
+                    "main_category": "Day 01",
+                    "sub_category": None,
+                    "items": [{"number": 1, "type": "numeric", "answer": "7"}],
+                }
+            ],
+            "notes": [],
+        }
+
         class FakeResponse:
-            text = '{"entries": [{"number": 1, "type": "numeric", "answer": "7"}], "notes": []}'
+            text = json.dumps(payload)
 
         class FakeModels:
+            def __init__(self):
+                self.seen_keys = []
+
             def generate_content(self, **kwargs):
                 return FakeResponse()
 
@@ -56,7 +79,14 @@ class TestSaveApiKey:
 
         from app.services import gemini as gemini_service
 
-        monkeypatch.setattr(gemini_service, "_client", lambda: FakeClient())
+        holder = FakeClient()
+        captured = {}
+
+        def fake_client(key):
+            captured["key"] = key
+            return holder
+
+        monkeypatch.setattr(gemini_service, "_client", fake_client)
         client.post("/api/settings/api-key", json={"api_key": FULL_KEY})
         r = client.post(
             "/api/extract",
@@ -64,13 +94,67 @@ class TestSaveApiKey:
         )
         assert r.status_code == 200
         assert r.json()["engine"] == "gemini-vision"
+        assert captured["key"] == FULL_KEY  # user's own key reached the SDK
+
+    def test_header_override_used_for_extract(self, client, monkeypatch):
+        payload = {
+            "workbook_title": "",
+            "groups": [
+                {
+                    "main_category": "Day 01",
+                    "items": [{"number": 1, "type": "numeric", "answer": "7"}],
+                }
+            ],
+            "notes": [],
+        }
+
+        class FakeResponse:
+            text = json.dumps(payload)
+
+        class FakeModels:
+            def generate_content(self, **kwargs):
+                return FakeResponse()
+
+        class FakeClient:
+            models = FakeModels()
+
+        from app.services import gemini as gemini_service
+
+        captured = {}
+
+        def fake_client(key):
+            captured["k"] = key
+            return FakeClient()
+
+        monkeypatch.setattr(gemini_service, "_client", fake_client)
+        header_key = "AIzaSyD-header-supplied-key-000000"
+        r = client.post(
+            "/api/extract",
+            files={"file": ("key.png", b"\x89PNG fake", "image/png")},
+            headers={"X-Gemini-Api-Key": header_key},
+        )
+        assert r.status_code == 200
+        assert captured["k"] == header_key
+
+    def test_rejects_non_aiza_format(self, client):
+        r = client.post(
+            "/api/settings/api-key", json={"api_key": "AQAbcd123notAGoogleKey"}
+        )
+        assert r.status_code == 400
+        assert "AIza" in r.json()["detail"]
 
     def test_blank_rejected(self, client):
-        assert client.post("/api/settings/api-key", json={"api_key": ""}).status_code == 422
-        assert client.post("/api/settings/api-key", json={"api_key": "   "}).status_code == 400
+        assert (
+            client.post("/api/settings/api-key", json={"api_key": ""}).status_code
+            == 422
+        )
+        assert (
+            client.post("/api/settings/api-key", json={"api_key": "   "}).status_code
+            == 400
+        )
 
     def test_too_long_rejected(self, client):
-        r = client.post("/api/settings/api-key", json={"api_key": "k" * 301})
+        r = client.post("/api/settings/api-key", json={"api_key": "AIza" + "k" * 301})
         assert r.status_code == 422
 
 
@@ -84,13 +168,11 @@ class TestDeleteApiKey:
 
     def test_delete_falls_back_to_env(self, client, monkeypatch):
         client.post("/api/settings/api-key", json={"api_key": FULL_KEY})
-        monkeypatch.setenv("GOOGLE_API_KEY", "env-only-key")
-        from app.main import create_app
-
-        with TestClient(create_app()) as c:
-            data = c.delete("/api/settings/api-key").json()
-            assert data["set"] is True
-            assert data["source"] == "env"
+        monkeypatch.setenv("GOOGLE_API_KEY", "AIzaSyD-env-only-key-1234567890")
+        r = client.delete("/api/settings/api-key")
+        assert r.status_code == 200
+        assert r.json()["set"] is True
+        assert r.json()["source"] == "server"
 
 
 class TestPersistence:
@@ -101,4 +183,35 @@ class TestPersistence:
         with TestClient(create_app()) as c:
             assert c.get("/api/health").json()["gemini_available"] is True
             status = c.get("/api/settings/api-key").json()
-        assert status["source"] == "app"
+        assert status["source"] == "user"
+
+    def test_keys_are_isolated_per_user(self, client):
+        """Two users must never see or use each other's Gemini keys."""
+        from app.db import connect
+        from app.deps import get_current_user
+        from app.main import create_app
+
+        client.post("/api/settings/api-key", json={"api_key": FULL_KEY})
+
+        # second user via Google sub
+        conn = connect()
+        user_b = conn.execute(
+            "INSERT INTO users(google_sub, email, name)"
+            " VALUES ('g-b', 'b@test', 'B')"
+        )
+        conn.commit()
+        uid_b = int(user_b.lastrowid)
+        conn.close()
+
+        app = create_app()
+        app.dependency_overrides[get_current_user] = lambda: {
+            "id": uid_b,
+            "email": "b@test",
+            "name": "B",
+            "gemini_api_key": "",
+        }
+        with TestClient(app) as c2:
+            status = c2.get("/api/settings/api-key").json()
+            assert status["set"] is False  # B does not see A's key
+            health = c2.get("/api/health").json()
+            assert health["gemini_available"] is False  # nor its usage

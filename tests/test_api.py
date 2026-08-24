@@ -155,7 +155,7 @@ class TestExtraction:
         client_holder = FakeClient()
         monkeypatch.setattr(gemini_service.config, "GEMINI_API_KEY", "test-key")
         monkeypatch.setattr(gemini_service.config, "GEMINI_MODEL", model)
-        monkeypatch.setattr(gemini_service, "_client", lambda: client_holder)
+        monkeypatch.setattr(gemini_service, "_client", lambda key: client_holder)
         return client_holder
 
     def test_image_extract_via_gemini(self, client, monkeypatch):

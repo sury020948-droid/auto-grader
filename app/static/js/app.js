@@ -61,8 +61,15 @@
   const storage = {
     get(key) { try { return sessionStorage.getItem(key); } catch { return null; } },
     set(key, val) { try { sessionStorage.setItem(key, val); } catch { /* noop */ } },
-    remove(key) { try { sessionStorage.removeItem(key); } catch { /* noop */ } }
+    remove(key) { try { sessionStorage.removeItem(key); } catch { /* noop */ } },
+    localGet(key) { try { return localStorage.getItem(key); } catch { return null; } },
+    localSet(key, val) { try { localStorage.setItem(key, val); } catch { /* noop */ } },
+    localRemove(key) { try { localStorage.removeItem(key); } catch { /* noop */ } }
   };
+
+  /* Auth token (localStorage so it survives reloads across OAuth redirects). */
+  const getToken = () => storage.localGet('ag_token') || '';
+  const clearToken = () => storage.localRemove('ag_token');
 
   /* Circled numerals (①–⑳) → digits; full-width digits → ASCII; "(3)" → "3". */
   function canonAnswer(raw) {
@@ -98,6 +105,8 @@
    * ------------------------------------------------------------------ */
   async function api(path, { method = 'GET', body, formData } = {}) {
     const opts = { method, headers: {} };
+    const token = getToken();
+    if (token) opts.headers['Authorization'] = `Bearer ${token}`;
     if (formData) {
       opts.body = formData;
     } else if (body !== undefined) {
@@ -161,7 +170,9 @@
    * ------------------------------------------------------------------ */
   const state = {
     preview: null,   // last ExtractionPreview
-    file: null       // selected File in extract view
+    file: null,      // selected File in extract view
+    user: null,      // current user from /api/auth/me
+    needsAuth: false // OAuth enabled but no valid session
   };
 
   const HEADER_TYPE_NAMES = {
@@ -249,6 +260,7 @@
   async function render() {
     const seq = ++renderSeq;
     const route = parseRoute();
+    if (state.needsAuth) { viewLogin(); return; }
     showLoading();
     const guard = (fn) => fn().catch((err) => {
       if (seq !== renderSeq) return;
@@ -264,6 +276,33 @@
       case 'attempt':  await guard(() => viewAttempt(route.id)); break;
       default:         await guard(viewLibrary);
     }
+  }
+
+  /* ==================================================================
+   * View: Login (OAuth gate)
+   * ================================================================== */
+  function viewLogin() {
+    const origin = encodeURIComponent(location.origin);
+    view.innerHTML = `
+      <section class="page login-page" aria-label="로그인">
+        <div class="card login-card">
+          <div class="login-brand">${ic('check', 30)}</div>
+          <h1 class="page-title" tabindex="-1">정답기에 로그인</h1>
+          <p class="sub" style="margin:8px 0 20px;">
+            내 워크북·채점 기록·API 키는 계정별로 안전하게 분리됩니다.<br>
+            Google 계정으로 로그인해 주세요.
+          </p>
+          <a class="btn btn-block google-btn"
+             href="/api/auth/google/start?origin=${origin}">
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M21.35 11.1H12v2.9h5.35c-.25 1.4-1.7 4.1-5.35 4.1-3.2 0-5.8-2.6-5.8-5.85S8.8 6.4 12 6.4c1.85 0 3.05.8 3.75 1.45l2.55-2.45C16.75 3.9 14.6 3 12 3 7 3 3 7 3 12s4 9 9 9c5.2 0 8.65-3.65 8.65-8.8 0-.6-.1-1.05-.3-1.1z"/></svg>
+            Google로 계속하기
+          </a>
+          <p class="muted" style="font-size:12.5px;margin-top:14px;">
+            로그인에 문제가 있나요? 관리자에게 GOOGLE_CLIENT_ID 설정을 문의하세요.
+          </p>
+        </div>
+      </section>`;
+    focusTitle();
   }
 
   /* ==================================================================
@@ -388,6 +427,12 @@
           </div>
 
           <div class="tabpanel" id="panel-photo" role="tabpanel" aria-labelledby="tab-photo">
+            <div class="banner banner-rec upload-guide-banner">
+              ${ic('image', 15)}
+              <span>인식률을 높이려면 <strong>정답 부분만 크롭</strong>해서 올려주세요.</span>
+              <button type="button" class="btn btn-secondary btn-sm" id="btn-upload-guide"
+                      style="margin-left:auto;">촬영 가이드</button>
+            </div>
             <label class="dropzone" id="dropzone" for="inp-file">
               <span class="dz-icon">${ic('upload', 30)}</span>
               <strong>정답지 사진을 끌어다 놓거나 눌러서 선택</strong>
@@ -440,6 +485,11 @@
     const btnPhoto = $('#btn-extract-photo');
     const btnText = $('#btn-extract-text');
     const taText = $('#inp-raw-text');
+
+    $('#btn-upload-guide').addEventListener('click', () => openUploadGuide());
+    let guideSeen = null;
+    try { guideSeen = localStorage.getItem('ag_upload_guide_seen'); } catch { /* noop */ }
+    if (!guideSeen) openUploadGuide(true);
 
     fileInput.addEventListener('change', () => {
       const f = fileInput.files && fileInput.files[0];
@@ -1577,7 +1627,7 @@
   });
 
   $('#btn-apikey-remove').addEventListener('click', async () => {
-    if (!window.confirm('저장된 API 키를 삭제할까요?\n삭제하면 사진 등록을 위해 환경 변수 키(있다면)가 다시 사용됩니다.')) return;
+    if (!window.confirm('저장된 API 키를 삭제할까요?\n내 계정에서만 제거되며, 이후 서버 기본 키(있다면)가 사용됩니다.')) return;
     setPending($('#btn-apikey-remove'), true);
     try {
       await api('/settings/api-key', { method: 'DELETE' });
@@ -1614,7 +1664,75 @@
     }
   }
 
+  /* --- header identity chips --- */
+  function renderHeaderUser() {
+    const chip = $('#user-chip');
+    const out = $('#btn-logout');
+    const localChip = $('#local-mode-chip');
+    if (!chip) return;
+    const u = state.user;
+    if (state.needsAuth || !u || !u.id) {
+      chip.hidden = true;
+      out.hidden = true;
+      localChip.hidden = true;
+      return;
+    }
+    chip.hidden = false;
+    chip.textContent = `${u.name || u.email || '사용자'}님`;
+    chip.title = u.email || '';
+    out.hidden = false;
+    // OAuth off → shared local user; warn about shared data
+    if (u.oauth_enabled === false && u.google_sub !== 'g-x') {
+      localChip.hidden = false;
+    }
+  }
+
+  function openUploadGuide(firstTime = false) {
+    const dlg = $('#dlg-upload-guide');
+    if (!dlg) return;
+    if (firstTime) {
+      try { localStorage.setItem('ag_upload_guide_seen', '1'); } catch { /* noop */ }
+    }
+    dlg.showModal();
+  }
+
+  /* ------------------------------------------------------------------
+   * Boot
+   * ------------------------------------------------------------------ */
   window.addEventListener('hashchange', render);
-  checkHealth();
-  render();
+
+  async function boot() {
+    // Capture OAuth result fragments before the router sees them.
+    const mTok = (location.hash || '').match(/[#&]token=([^&]+)/);
+    if (mTok) {
+      storage.localSet('ag_token', decodeURIComponent(mTok[1]));
+      history.replaceState(null, '', location.pathname + location.search + '#/');
+    } else if (/^#auth=failed/.test(location.hash || '')) {
+      history.replaceState(null, '', location.pathname + location.search + '#/');
+      setTimeout(() => toast(
+        'Google 로그인에 실패했습니다. 다시 시도해 주세요.', 'error'), 50);
+    }
+
+    try {
+      state.user = await api('/auth/me');
+      state.needsAuth = false;
+    } catch (err) {
+      if (err.status === 401) {
+        state.needsAuth = true;
+        clearToken();
+      }
+      state.user = null;
+    }
+    renderHeaderUser();
+
+    $('#btn-logout').addEventListener('click', () => {
+      clearToken();
+      location.href = '/';
+    });
+
+    await checkHealth();
+    render();
+  }
+
+  boot();
 })();
