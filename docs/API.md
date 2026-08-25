@@ -62,7 +62,8 @@ AttemptResult { "id": 7, "section_id": 3, "taken_at": "...",
                 "total": 20, "score": 18, "percent": 90.0,
                 "results": [ { "number": 1, "qtype": "numeric", "expected": "3", "given": "3", "status": "correct" },   // correct|incorrect|unanswered
                              { "number": 2, "qtype": "multiple_choice", "expected": "1,4", "given": "4,1", "status": "correct" } ],
-                "wrong_numbers": [5], "unanswered_numbers": [] }
+                "wrong_numbers": [5], "unanswered_numbers": [],
+                "note"?: "..." }   // present when extra/unanswered inputs were excluded (see below)
 ```
 
 ## Endpoints
@@ -125,11 +126,16 @@ AttemptResult { "id": 7, "section_id": 3, "taken_at": "...",
 - `DELETE /api/sections/{sid}` → `204`. Deletes that session only; its answer keys and
   attempts cascade, sibling sections/workbook stay untouched (404 if missing)
 - `POST /api/attempts` body `{ "section_id": 3, "answers": { "1": "3", "2": "" },
-  "merge_attempt_id"?: 7 }` → `201 AttemptResult`
+  "merge_attempt_id"?: 7, "answered_only"?: false }` → `201 AttemptResult`
   (404 unknown section; empty answers allowed → all unanswered.
   With `merge_attempt_id`, the base attempt's given answers are overlaid by the new
   ones so previously solved questions keep their correct status — retry flow.
-  Response gains `"merged_from": 7` when used; base attempt history is untouched.)
+  Response gains `"merged_from": 7` when used; base attempt history is untouched.
+  With `answered_only: true` (default `false`), blank/skipped questions are excluded
+  from `total` and `percent` instead of counting against the score — `results` still
+  lists them with `status: "unanswered"` and they still appear in `unanswered_numbers`,
+  they just no longer shrink the percentage. `score` is unaffected either way, since
+  unanswered questions were never counted as correct.)
 - `GET /api/sections/{sid}/attempts` → `AttemptSummary[]` (`{ id, taken_at, score, total, percent }`, desc)
 - `GET /api/attempts/{aid}` → full `AttemptResult` (review after grading)
 - `DELETE /api/attempts/{aid}` → `204`

@@ -45,6 +45,7 @@ class AttemptCreate(BaseModel):
     section_id: int = Field(ge=1, le=2**63 - 1)
     answers: dict[str, SAFE_STR] = Field(default_factory=dict)
     merge_attempt_id: int | None = Field(default=None, ge=1, le=2**63 - 1)
+    answered_only: bool = Field(default=False)
 
     @model_validator(mode="after")
     def _cap_answers(self):

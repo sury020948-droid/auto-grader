@@ -131,6 +131,9 @@ soft shadows, mobile-first breakpoints at 640/900px.
   only WITHIN one section. Numbers restarting at 1 in each section are normal and never collide.
 - Empty/garbage OCR output → clear error + paste-mode suggestion.
 - Unanswered inputs at submit → counted incorrect, flagged separately in results.
+- Opt-in "응답한 문항만 채점" mode (per-submission checkbox) → skipped questions are excluded
+  from the total/percent instead of counting against the score; still flagged as unanswered
+  in the results list.
 - Section with N problems graded with extra user inputs → extras ignored with note.
 
 ## 9. Success Metrics (simulated QA targets)

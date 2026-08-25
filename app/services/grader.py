@@ -7,6 +7,7 @@ def grade(
     keys_canonical: dict[int, str],
     keys_display: dict[int, str],
     answers: dict[str, str],
+    answered_only: bool = False,
 ) -> dict[str, Any]:
     results = []
     wrong_numbers = []
@@ -50,6 +51,8 @@ def grade(
             }
         )
 
+    if answered_only:
+        total -= len(unanswered_numbers)
     percent = round(score / total * 100, 1) if total else 0.0
     return {
         "results": results,

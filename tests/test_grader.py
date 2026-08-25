@@ -85,3 +85,35 @@ class TestGrade:
         kc, kd = _keys({1: ("3", "3")})
         out = grade(kc, kd, {"1": "'; DROP TABLE workbooks;--"})
         assert out["results"][0]["status"] == "incorrect"
+
+    def test_answered_only_excludes_unanswered_from_total(self):
+        kc, kd = _keys({1: ("3", "3"), 2: ("1", "1"), 3: ("4", "4")})
+        out = grade(kc, kd, {"1": "3", "2": "2"}, answered_only=True)
+        assert out["score"] == 1
+        assert out["total"] == 2
+        assert out["percent"] == 50.0
+        statuses = {r["number"]: r["status"] for r in out["results"]}
+        assert statuses == {1: "correct", 2: "incorrect", 3: "unanswered"}
+        assert out["wrong_numbers"] == [2]
+        assert out["unanswered_numbers"] == [3]
+
+    def test_answered_only_defaults_to_false(self):
+        kc, kd = _keys({1: ("3", "3"), 2: ("1", "1")})
+        out = grade(kc, kd, {"1": "3"})
+        assert out["total"] == 2
+        assert out["percent"] == 50.0
+
+    def test_answered_only_all_unanswered_gives_zero_total(self):
+        kc, kd = _keys({1: ("3", "3"), 2: ("1", "1")})
+        out = grade(kc, kd, {}, answered_only=True)
+        assert out["score"] == 0
+        assert out["total"] == 0
+        assert out["percent"] == 0.0
+        assert out["unanswered_numbers"] == [1, 2]
+
+    def test_answered_only_all_answered_matches_default_mode(self):
+        kc, kd = _keys({1: ("3", "3"), 2: ("1", "1")})
+        out_default = grade(kc, kd, {"1": "3", "2": "1"})
+        out_answered_only = grade(kc, kd, {"1": "3", "2": "1"}, answered_only=True)
+        assert out_default["total"] == out_answered_only["total"] == 2
+        assert out_default["percent"] == out_answered_only["percent"] == 100.0

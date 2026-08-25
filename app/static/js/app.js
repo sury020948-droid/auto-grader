@@ -1203,6 +1203,8 @@
       } catch { /* corrupted storage → normal mode */ }
     }
 
+    const answeredOnlyDefault = storage.localGet('ag_answered_only') === '1';
+
     const inputsHtml = numbers.map((n) => `
       <li class="ans-cell">
         <span class="ans-num" id="ans-num-${n}">${n}번</span>
@@ -1229,6 +1231,10 @@
         </div>` : ''}
 
         <form id="quiz-form" novalidate>
+          <label style="display:block; margin-bottom:14px;">
+            <input type="checkbox" id="chk-answered-only"${answeredOnlyDefault ? ' checked' : ''}>
+            응답한 문항만 채점 (미응답 문항은 총 문항수·점수에서 제외)
+          </label>
           <ul class="answer-grid">${inputsHtml}</ul>
 
           <footer class="quiz-footer">
@@ -1245,6 +1251,7 @@
     const inputs = Array.from(grid.querySelectorAll('.ans-input'));
     const progressEl = $('#progress-text');
     const submitBtn = $('#btn-submit');
+    const answeredOnlyChk = $('#chk-answered-only', view);
 
     function updateProgress() {
       const total = inputs.length;
@@ -1252,6 +1259,10 @@
       progressEl.textContent = `응답 ${done}/${total} · 미응답 ${total - done}`;
     }
     updateProgress();
+
+    answeredOnlyChk.addEventListener('change', () => {
+      storage.localSet('ag_answered_only', answeredOnlyChk.checked ? '1' : '0');
+    });
 
     grid.addEventListener('input', (e) => {
       if (e.target.classList.contains('ans-input')) {
@@ -1332,8 +1343,14 @@
       inputs.forEach((i) => {
         answers[String(i.dataset.number)] = i.value.trim();
       });
+      const answeredOnly = answeredOnlyChk.checked;
       const unanswered = inputs.filter((i) => i.value.trim() === '').length;
-      if (unanswered > 0 &&
+      if (answeredOnly && unanswered === inputs.length) {
+        toast('응답한 문항만 채점하려면 최소 1문항은 답을 입력해야 합니다.', 'error');
+        if (inputs[0]) inputs[0].focus();
+        return;
+      }
+      if (!answeredOnly && unanswered > 0 &&
           !window.confirm(`응답하지 않은 문제가 ${unanswered}개 있습니다. 미응답으로 제출할까요?`)) {
         const firstEmpty = inputs.find((i) => i.value.trim() === '');
         if (firstEmpty) firstEmpty.focus();
@@ -1343,7 +1360,7 @@
       $('#btn-bulk').disabled = true;
       setPending(submitBtn, true, '채점 중…');
       try {
-        const body = { section_id: sid, answers };
+        const body = { section_id: sid, answers, answered_only: answeredOnly };
         if (retryMode && retryBaseAttempt) {
           // Partial merge: previously correct answers are preserved server-side;
           // only the re-attempted numbers are updated.

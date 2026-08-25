@@ -358,6 +358,40 @@ class TestImportAndGrading:
         assert att["score"] >= 1
         assert "note" in att
 
+    def test_answered_only_excludes_skipped_from_total(self, client, wb):
+        r = _import_headers(client, wb)
+        sid = r.json()["sections"][0]["id"]
+        att = client.post(
+            "/api/attempts",
+            json={
+                "section_id": sid,
+                "answers": {"1": "3", "2": "9"},
+                "answered_only": True,
+            },
+        ).json()
+        assert att["score"] == 1
+        assert att["total"] == 2
+        assert att["percent"] == 50.0
+        assert att["wrong_numbers"] == [2]
+        assert set(att["unanswered_numbers"]) == {3, 4, 5}
+        assert att["note"] == "3문항은 미응답으로 채점에서 제외했습니다."
+
+        full = client.get(f"/api/attempts/{att['id']}").json()
+        assert full["total"] == 2
+        assert full["percent"] == 50.0
+        assert set(full["unanswered_numbers"]) == {3, 4, 5}
+
+    def test_answered_only_omitted_keeps_full_total(self, client, wb):
+        r = _import_headers(client, wb)
+        sid = r.json()["sections"][0]["id"]
+        att = client.post(
+            "/api/attempts",
+            json={"section_id": sid, "answers": {"1": "3", "2": "9"}},
+        ).json()
+        assert att["total"] == 5
+        assert att["percent"] == 20.0
+        assert "note" not in att
+
     def test_from_misses_perfect_422(self, client, wb):
         r = _import_headers(client, wb)
         sid = r.json()["sections"][0]["id"]

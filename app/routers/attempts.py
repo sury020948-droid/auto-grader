@@ -90,7 +90,7 @@ def create_attempt(
     keys = dal.get_keys(conn, payload.section_id, uid)
     keys_canonical = {n: c for n, (c, _) in keys.items()}
     keys_display = {n: d for n, (_, d) in keys.items()}
-    graded = grade(keys_canonical, keys_display, effective)
+    graded = grade(keys_canonical, keys_display, effective, answered_only=payload.answered_only)
     aid = dal.create_attempt(
         conn,
         uid,
@@ -104,8 +104,13 @@ def create_attempt(
     out = _serialize_attempt(saved)
     if payload.merge_attempt_id is not None:
         out["merged_from"] = payload.merge_attempt_id
+    notes = []
     if graded["extra_ignored"]:
-        out["note"] = f"목록에 없는 문항 {len(graded['extra_ignored'])}개는 무시했습니다."
+        notes.append(f"목록에 없는 문항 {len(graded['extra_ignored'])}개는 무시했습니다.")
+    if payload.answered_only and graded["unanswered_numbers"]:
+        notes.append(f"{len(graded['unanswered_numbers'])}문항은 미응답으로 채점에서 제외했습니다.")
+    if notes:
+        out["note"] = " ".join(notes)
     return out
 
 
