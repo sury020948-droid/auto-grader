@@ -141,6 +141,7 @@ AttemptResult { "id": 7, "section_id": 3, "taken_at": "...",
 - `DELETE /api/attempts/{aid}` → `204`
 
 ### Stats & Utility
-- `GET /api/workbooks/{wid}/stats` → `{ "sections": [ { "section_id":3, "label":"Day 01", "attempt_count":2, "latest_percent":90.0, "best_percent":95.0 } ], "top_missed": [ { "number": 7, "count": 3, "section_label": "Day 02" } ] }`
+- `GET /api/workbooks/{wid}/stats` → `{ "sections": [ { "section_id":3, "label":"Day 01", "attempt_count":2, "latest_percent":90.0, "best_percent":95.0 } ], "top_missed": [ { "number": 7, "count": 3, "section_label": "Day 02", "section_id": 4, "workbook_id": 1, "workbook_title": "..." } ] }`
+  (`top_missed` is scoped to `{wid}` only — misses from the caller's other workbooks never leak in)
 - `POST /api/attempts/from-misses` body `{ "attempt_id": 7 }` → `201 { "section_id": 3, "numbers": [5,9] }`
   (returns problem list for a retry-only-misses session; graded via normal POST /api/attempts restricted to those numbers)

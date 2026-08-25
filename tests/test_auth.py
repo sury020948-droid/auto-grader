@@ -126,6 +126,32 @@ class TestTenantIsolation:
             == 404
         )
 
+    def test_stats_scoped_across_devices(self, client, other_device_client):
+        """The workbook stats endpoint (sections + top_missed) must 404 for a
+        foreign device, not just omit/scope the data -- top_missed's rows now
+        carry workbook_id/workbook_title/section_id, so a leak here would
+        expose another user's workbook identity, not just question numbers."""
+        wid = client.post("/api/workbooks", json={"title": "A의 워크북"}).json()["id"]
+        pv = client.post(
+            "/api/extract-text",
+            json={"raw_text": "Day 01\n1. 3 2. 4 3. 1"},
+        ).json()
+        sid = client.post(
+            f"/api/workbooks/{wid}/sections/import",
+            json={
+                "structure": "headers",
+                "header_type": "day",
+                "entries": [
+                    {"number": e["number"], "answer": e["answer"], "line": e["line"]}
+                    for e in pv["entries"]
+                ],
+                "headers": pv["headers"],
+            },
+        ).json()["sections"][0]["id"]
+        client.post("/api/attempts", json={"section_id": sid, "answers": {"1": "9"}})
+
+        assert other_device_client.get(f"/api/workbooks/{wid}/stats").status_code == 404
+
     def test_gemini_keys_isolated_per_device(self, client, other_device_client):
         client.post(
             "/api/settings/api-key", json={"api_key": "AIzaSyD-device-a-key-000"}

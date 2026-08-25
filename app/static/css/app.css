@@ -505,7 +505,18 @@ button.chip:hover { filter: brightness(.96); box-shadow: 0 0 0 3px rgba(15, 23, 
   align-items: center;
   gap: 10px;
   font-size: 14px;
+  width: 100%;
+  margin: -6px;
+  padding: 6px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
 }
+.missed-item:hover { background: rgba(15, 23, 42, .06); }
 .missed-num {
   flex: 0 0 auto;
   min-width: 40px;
@@ -823,9 +834,23 @@ button.chip:hover { filter: brightness(.96); box-shadow: 0 0 0 3px rgba(15, 23, 
 .dialog-actions {
   display: flex;
   justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 20px;
 }
+
+.missed-detail-headline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 15px;
+  font-weight: 700;
+  margin-top: 14px;
+}
+.missed-detail-meta { display: grid; gap: 8px; font-size: 13.5px; margin-top: 14px; }
+.missed-detail-meta > div { display: flex; justify-content: space-between; gap: 12px; }
+.missed-detail-meta dt { color: var(--muted); }
+.missed-detail-meta dd { margin: 0; font-weight: 700; text-align: right; }
 
 .apikey-help {
   display: inline-block;

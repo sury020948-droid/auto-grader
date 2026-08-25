@@ -302,6 +302,10 @@ class TestImportAndGrading:
         assert len(stats["sections"]) == 2
         top = stats["top_missed"]
         assert top and any(t["number"] == 2 for t in top)
+        entry = next(t for t in top if t["number"] == 2)
+        assert entry["section_id"] == sid
+        assert entry["workbook_id"] == wb
+        assert entry["workbook_title"] == "테스트 문제집"
 
         history = client.get(f"/api/sections/{sid}/attempts").json()
         assert len(history) == 2

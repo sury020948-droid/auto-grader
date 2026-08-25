@@ -1039,10 +1039,12 @@
 
     const missedHtml = topMissed.length
       ? `<ul class="missed-list">
-          ${topMissed.map((m) => `
-            <li class="missed-item">
-              <span class="missed-num">${Number(m.number)}번</span>
-              <span>${Number(m.count)}회 틀림<span class="muted"> · ${esc(m.section_label || '')}</span></span>
+          ${topMissed.map((m, i) => `
+            <li>
+              <button type="button" class="missed-item" data-missed-idx="${i}">
+                <span class="missed-num">${Number(m.number)}번</span>
+                <span>${Number(m.count)}회 틀림<span class="muted"> · ${esc(m.section_label || '')}</span></span>
+              </button>
             </li>`).join('')}
         </ul>`
       : `<p class="muted" style="font-size:14px;">아직 채점 기록이 없습니다. 섹션에서 채점을 시작해 보세요.</p>`;
@@ -1172,7 +1174,30 @@
       });
     });
 
+    view.querySelectorAll('[data-missed-idx]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const m = topMissed[Number(btn.getAttribute('data-missed-idx'))];
+        if (m) openMissedDetailModal(m);
+      });
+    });
+
     focusTitle();
+  }
+
+  /* "자주 틀린 문제" 항목 클릭 시 소속 워크북/섹션을 보여주는 상세 모달. */
+  function openMissedDetailModal(m) {
+    $('#missed-detail-body').innerHTML = `
+      <p class="missed-detail-headline">
+        <span class="missed-num">${Number(m.number)}번</span>
+        <span>${Number(m.count)}회 틀림</span>
+      </p>
+      <dl class="missed-detail-meta">
+        <div><dt>워크북</dt><dd>${esc(m.workbook_title || '')}</dd></div>
+        <div><dt>섹션</dt><dd>${esc(m.section_label || '')}</dd></div>
+      </dl>`;
+    $('#missed-detail-wb-link').href = `#/wb/${Number(m.workbook_id)}`;
+    $('#missed-detail-solve-link').href = `#/sec/${Number(m.section_id)}/solve`;
+    $('#dlg-missed-detail').showModal();
   }
 
   /* ==================================================================

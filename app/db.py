@@ -511,16 +511,17 @@ def top_missed(
     rows = _q(
         conn,
         """
-        SELECT aa.number AS number, COUNT(*) AS count, s.label AS section_label
+        SELECT aa.number AS number, COUNT(*) AS count, s.label AS section_label,
+               s.id AS section_id, w.id AS workbook_id, w.title AS workbook_title
         FROM attempt_answers aa
         JOIN attempts a ON a.id = aa.attempt_id
         JOIN sections s ON s.id = a.section_id
         JOIN workbooks w ON w.id = s.workbook_id
-        WHERE w.user_id = ? AND aa.status != 'correct'
+        WHERE w.id = ? AND w.user_id = ? AND aa.status != 'correct'
         GROUP BY s.id, aa.number
         ORDER BY count DESC, aa.number
         LIMIT ?
         """,
-        (uid, limit),
+        (wid, uid, limit),
     )
     return [dict(r) for r in rows]

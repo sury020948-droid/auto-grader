@@ -142,6 +142,88 @@ class TestSectionDeletion:
         assert client.delete("/api/sections/999999").status_code == 404
 
 
+class TestTopMissedWorkbookScoping:
+    """Regression: `top_missed` must be scoped to the requested workbook only —
+    the underlying query used to ignore `wid` and mix in misses from every
+    workbook the caller owns."""
+
+    def test_top_missed_excludes_other_workbooks(self, client, two_sections):
+        wid, s1, _ = two_sections
+        client.post("/api/attempts", json={"section_id": s1, "answers": {"1": "9"}})
+
+        other_wid = client.post(
+            "/api/workbooks", json={"title": "다른 워크북"}
+        ).json()["id"]
+        preview = client.post("/api/extract-text", json={"raw_text": DAY_SAMPLE}).json()
+        other_secs = client.post(
+            f"/api/workbooks/{other_wid}/sections/import",
+            json={
+                "structure": "headers",
+                "header_type": "day",
+                "entries": [
+                    {"number": e["number"], "answer": e["answer"], "line": e["line"]}
+                    for e in preview["entries"]
+                ],
+                "headers": preview["headers"],
+            },
+        ).json()["sections"]
+        other_sid = other_secs[0]["id"]
+        client.post("/api/attempts", json={"section_id": other_sid, "answers": {"1": "9"}})
+
+        stats = client.get(f"/api/workbooks/{wid}/stats").json()
+        top = stats["top_missed"]
+        assert top  # workbook A has its own miss on Q1
+        assert all(t["workbook_id"] == wid for t in top)
+        assert all(t["section_id"] != other_sid for t in top)
+
+        other_stats = client.get(f"/api/workbooks/{other_wid}/stats").json()
+        other_top = other_stats["top_missed"]
+        assert other_top  # workbook B has its own (separate) miss on Q1
+        assert all(t["workbook_id"] == other_wid for t in other_top)
+        assert all(t["section_id"] != s1 for t in other_top)
+
+    def test_top_missed_attributes_each_entry_to_its_own_section(
+        self, client, two_sections
+    ):
+        """Two sections *of the same workbook* missing the same question number
+        must stay two distinct rows (grouped by section, not merged), each
+        carrying its own section_id/section_label alongside the shared
+        workbook_id/workbook_title -- this per-row attribution is what the
+        detail modal renders."""
+        wid, s1, s2 = two_sections  # Day 01, Day 02 -- see DAY_SAMPLE above
+
+        # one miss on Q2 in Day 01 (correct answer there is "4")
+        client.post("/api/attempts", json={"section_id": s1, "answers": {"2": "9"}})
+        # two separate misses on Q2 in Day 02 (correct answer there is "3")
+        client.post("/api/attempts", json={"section_id": s2, "answers": {"2": "9"}})
+        client.post("/api/attempts", json={"section_id": s2, "answers": {"2": "9"}})
+
+        top = client.get(f"/api/workbooks/{wid}/stats").json()["top_missed"]
+        q2_rows = [t for t in top if t["number"] == 2]
+        assert len(q2_rows) == 2  # kept separate per section, not collapsed together
+
+        by_section = {t["section_id"]: t for t in q2_rows}
+        assert set(by_section) == {s1, s2}
+        assert by_section[s1]["count"] == 1
+        assert by_section[s2]["count"] == 2
+        assert by_section[s1]["section_label"] == "Day 01"
+        assert by_section[s2]["section_label"] == "Day 02"
+
+        # same workbook throughout -- only the section differs
+        assert by_section[s1]["workbook_id"] == wid
+        assert by_section[s2]["workbook_id"] == wid
+        assert (
+            by_section[s1]["workbook_title"]
+            == by_section[s2]["workbook_title"]
+            == "세션 관리 테스트"
+        )
+
+        # ORDER BY count DESC, number: Day 02's row (count=2) sorts before
+        # Day 01's (count=1), confirming the new columns ride along correctly
+        # rather than the grouping/order being disturbed by the extra joins.
+        assert top.index(by_section[s2]) < top.index(by_section[s1])
+
+
 class TestConflictDetectionApi:
     def _incoming_headers(self, labels_lines):
         """Build a headers-mode import payload from [(label, line), ...]."""
