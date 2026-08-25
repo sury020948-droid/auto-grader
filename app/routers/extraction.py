@@ -100,8 +100,8 @@ async def extract(
             if "API key not valid" in msg or "API_KEY_INVALID" in msg:
                 raise AppError(
                     401,
-                    "Gemini API 키가 유효하지 않습니다. 설정 화면에서 'AIza'로 시작하는"
-                    " 올바른 키를 등록해 주세요.",
+                    "Gemini API 키가 유효하지 않습니다. 설정 화면에서 올바른 키를"
+                    " 등록해 주세요.",
                 ) from exc
             raise
     if raw_text is not None and raw_text.strip():
@@ -121,7 +121,10 @@ def _paste_preview(raw_text: str):
 
 
 @router.post("/extract-text")
-def extract_text_json(payload: ExtractTextPayload):
+def extract_text_json(
+    payload: ExtractTextPayload,
+    user: dict = Depends(get_current_user),
+):
     return _paste_preview(payload.raw_text)
 
 

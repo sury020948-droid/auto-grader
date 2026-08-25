@@ -1,49 +1,52 @@
-"""Request-scoped authentication dependency.
+"""Request-scoped device authentication.
 
-When GOOGLE_CLIENT_ID/SECRET are configured, every request must carry a valid
-Bearer token and resolves to its own user. Without OAuth configured (e.g. local
-development), all traffic falls back to a single shared 'local' user so the app
-stays usable offline — the frontend shows a prominent warning banner for this.
+Every client generates a UUIDv4 once, stores it in localStorage, and sends it
+as the ``X-Device-User-Id`` header on all ``/api/*`` requests. The backend
+maps that UUID to an isolated per-device user row; all workbook/section/
+attempt records are scoped to it. Requests without a valid header are
+rejected (401 missing / 400 malformed).
 """
 
+import uuid
 from typing import Any
 
 from fastapi import Depends, HTTPException, Request
 
 from . import db as dal
 from .db import get_conn
-from .services import auth_tokens
+
+DEVICE_ID_HEADER = "X-Device-User-Id"
 
 
-def _bearer_token(request: Request) -> str:
-    auth = request.headers.get("Authorization", "")
-    if auth.lower().startswith("bearer "):
-        return auth[7:].strip()
-    return ""
-
-
-def oauth_enabled() -> bool:
-    return auth_tokens.oauth_configured()
-
-
-def ensure_local_user(conn) -> dict[str, Any]:
-    user = dal.get_user_by_sub(conn, "local")
-    if user:
-        return user
-    return dal.upsert_google_user(
-        conn, "local", "local@auto-grader", "로컬 사용자", ""
-    )
+def device_id_from_request(request: Request) -> str:
+    raw = request.headers.get(DEVICE_ID_HEADER, "").strip()
+    if not raw:
+        raise HTTPException(
+            401,
+            f"{DEVICE_ID_HEADER} 헤더가 필요합니다. 브라우저에서 기기 ID를"
+            " 생성해 요청에 포함해 주세요.",
+        )
+    try:
+        return str(uuid.UUID(raw))
+    except ValueError:
+        raise HTTPException(
+            400,
+            f"{DEVICE_ID_HEADER} 헤더 값이 유효한 UUID 형식이 아닙니다.",
+        ) from None
 
 
 def get_current_user(request: Request, conn=Depends(get_conn)) -> dict[str, Any]:
-    """Resolve the requesting user; 401 when OAuth is on and token invalid."""
-    if not oauth_enabled():
-        return ensure_local_user(conn)
+    """Resolve (and lazily create) the user bound to this device UUID."""
+    device_id = device_id_from_request(request)
+    return dal.get_or_create_device_user(conn, device_id)
 
-    uid = auth_tokens.verify_token(_bearer_token(request))
-    if uid is None:
-        raise HTTPException(status_code=401, detail="인증이 필요합니다.")
-    user = dal.get_user(conn, uid)
-    if not user:
-        raise HTTPException(status_code=401, detail="유효하지 않은 사용자입니다.")
-    return user
+
+def try_current_user(request: Request, conn=Depends(get_conn)) -> dict[str, Any] | None:
+    """Like get_current_user but returns None instead of raising.
+
+    Used by endpoints that must also serve anonymous callers
+    (e.g. GET /api/health for load-balancer checks)."""
+    try:
+        return get_current_user(request, conn)
+    except HTTPException:
+        return None

@@ -67,9 +67,30 @@
     localRemove(key) { try { localStorage.removeItem(key); } catch { /* noop */ } }
   };
 
-  /* Auth token (localStorage so it survives reloads across OAuth redirects). */
-  const getToken = () => storage.localGet('ag_token') || '';
-  const clearToken = () => storage.localRemove('ag_token');
+  /* Device user ID: generated once per browser, sent on every API call so the
+   * server can isolate each device's workbooks/records. */
+  const DEVICE_ID_KEY = 'ag_device_user_id';
+
+  function uuidv4() {
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+      return window.crypto.randomUUID();
+    }
+    const bytes = new Uint8Array(16);
+    window.crypto.getRandomValues(bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+    bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 10xx
+    const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+
+  const getDeviceUserId = () => {
+    let id = storage.localGet(DEVICE_ID_KEY);
+    if (!id || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
+      id = uuidv4();
+      storage.localSet(DEVICE_ID_KEY, id);
+    }
+    return id;
+  };
 
   /* Circled numerals (①–⑳) → digits; full-width digits → ASCII; "(3)" → "3". */
   function canonAnswer(raw) {
@@ -105,8 +126,7 @@
    * ------------------------------------------------------------------ */
   async function api(path, { method = 'GET', body, formData } = {}) {
     const opts = { method, headers: {} };
-    const token = getToken();
-    if (token) opts.headers['Authorization'] = `Bearer ${token}`;
+    opts.headers['X-Device-User-Id'] = getDeviceUserId();
     if (formData) {
       opts.body = formData;
     } else if (body !== undefined) {
@@ -171,8 +191,7 @@
   const state = {
     preview: null,   // last ExtractionPreview
     file: null,      // selected File in extract view
-    user: null,      // current user from /api/auth/me
-    needsAuth: false // OAuth enabled but no valid session
+    onboarded: false // Gemini key confirmed available for this device
   };
 
   const HEADER_TYPE_NAMES = {
@@ -260,7 +279,6 @@
   async function render() {
     const seq = ++renderSeq;
     const route = parseRoute();
-    if (state.needsAuth) { viewLogin(); return; }
     showLoading();
     const guard = (fn) => fn().catch((err) => {
       if (seq !== renderSeq) return;
@@ -276,33 +294,6 @@
       case 'attempt':  await guard(() => viewAttempt(route.id)); break;
       default:         await guard(viewLibrary);
     }
-  }
-
-  /* ==================================================================
-   * View: Login (OAuth gate)
-   * ================================================================== */
-  function viewLogin() {
-    const origin = encodeURIComponent(location.origin);
-    view.innerHTML = `
-      <section class="page login-page" aria-label="로그인">
-        <div class="card login-card">
-          <div class="login-brand">${ic('check', 30)}</div>
-          <h1 class="page-title" tabindex="-1">정답기에 로그인</h1>
-          <p class="sub" style="margin:8px 0 20px;">
-            내 워크북·채점 기록·API 키는 계정별로 안전하게 분리됩니다.<br>
-            Google 계정으로 로그인해 주세요.
-          </p>
-          <a class="btn btn-block google-btn"
-             href="/api/auth/google/start?origin=${origin}">
-            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M21.35 11.1H12v2.9h5.35c-.25 1.4-1.7 4.1-5.35 4.1-3.2 0-5.8-2.6-5.8-5.85S8.8 6.4 12 6.4c1.85 0 3.05.8 3.75 1.45l2.55-2.45C16.75 3.9 14.6 3 12 3 7 3 3 7 3 12s4 9 9 9c5.2 0 8.65-3.65 8.65-8.8 0-.6-.1-1.05-.3-1.1z"/></svg>
-            Google로 계속하기
-          </a>
-          <p class="muted" style="font-size:12.5px;margin-top:14px;">
-            로그인에 문제가 있나요? 관리자에게 GOOGLE_CLIENT_ID 설정을 문의하세요.
-          </p>
-        </div>
-      </section>`;
-    focusTitle();
   }
 
   /* ==================================================================
@@ -1588,12 +1579,12 @@
     api('/settings/api-key').then((s) => {
       if (s && s.set) {
         statusEl.textContent =
-          `등록된 키: ${s.masked}${s.source === 'env' ? ' (환경 변수)' : ''} — 새 키를 입력하면 교체됩니다.`;
-        removeBtn.hidden = s.source === 'env';
+          `등록된 키: ${s.masked}${s.source === 'server' ? ' (서버 공용 키)' : ''} — 새 키를 입력하면 교체됩니다.`;
+        removeBtn.hidden = s.source === 'server';
         inp.placeholder = '새 키로 교체하려면 입력하세요';
       } else {
         statusEl.textContent = '등록된 키가 없습니다. 아래 링크에서 무료로 발급할 수 있어요.';
-        inp.placeholder = 'AIza...';
+        inp.placeholder = '발급받은 키를 붙여넣으세요';
       }
     }).catch(() => { statusEl.textContent = ''; });
     dlg.showModal();
@@ -1627,7 +1618,7 @@
   });
 
   $('#btn-apikey-remove').addEventListener('click', async () => {
-    if (!window.confirm('저장된 API 키를 삭제할까요?\n내 계정에서만 제거되며, 이후 서버 기본 키(있다면)가 사용됩니다.')) return;
+    if (!window.confirm('저장된 API 키를 삭제할까요?\n이 기기에서만 제거되며, 이후 서버 기본 키(있다면)가 사용됩니다.')) return;
     setPending($('#btn-apikey-remove'), true);
     try {
       await api('/settings/api-key', { method: 'DELETE' });
@@ -1640,6 +1631,49 @@
       setPending($('#btn-apikey-remove'), false);
     }
   });
+
+  /* --- first-run onboarding: require a Gemini key before any uploads --- */
+  function lockOnboarding() {
+    const dlg = $('#dlg-onboarding');
+    if (!dlg) return;
+    // Non-dismissible: no cancel button in markup + block Esc/backdrop close.
+    dlg.addEventListener('cancel', (e) => e.preventDefault());
+    dlg.showModal();
+    $('#inp-onboard-key').focus();
+  }
+
+  $('#form-onboarding').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const dlg = $('#dlg-onboarding');
+    const inp = $('#inp-onboard-key');
+    const btn = $('#btn-onboard-save');
+    const key = inp.value.trim();
+    if (!key) {
+      toast('API 키를 입력해 주세요. 키가 있어야 사진 정답지를 등록할 수 있어요.', 'error');
+      inp.focus();
+      return;
+    }
+    setPending(btn, true, '저장 중…');
+    try {
+      await api('/settings/api-key', { method: 'POST', body: { api_key: key } });
+      state.onboarded = true;
+      dlg.close();
+      toast('API 키가 저장되었습니다. 이제 정답지를 등록할 수 있어요!', 'success');
+      checkHealth();
+    } catch (err) {
+      toast(err.message, 'error');
+    } finally {
+      setPending(btn, false);
+    }
+  });
+
+  async function maybeOnboard() {
+    if (state.onboarded) return;
+    try {
+      const s = await api('/settings/api-key');
+      if (!s || !s.set) lockOnboarding();
+    } catch { /* server unreachable — normal error UI handles it */ }
+  }
 
   async function checkHealth() {
     const chip = $('#gemini-chip');
@@ -1664,29 +1698,6 @@
     }
   }
 
-  /* --- header identity chips --- */
-  function renderHeaderUser() {
-    const chip = $('#user-chip');
-    const out = $('#btn-logout');
-    const localChip = $('#local-mode-chip');
-    if (!chip) return;
-    const u = state.user;
-    if (state.needsAuth || !u || !u.id) {
-      chip.hidden = true;
-      out.hidden = true;
-      localChip.hidden = true;
-      return;
-    }
-    chip.hidden = false;
-    chip.textContent = `${u.name || u.email || '사용자'}님`;
-    chip.title = u.email || '';
-    out.hidden = false;
-    // OAuth off → shared local user; warn about shared data
-    if (u.oauth_enabled === false && u.google_sub !== 'g-x') {
-      localChip.hidden = false;
-    }
-  }
-
   function openUploadGuide(firstTime = false) {
     const dlg = $('#dlg-upload-guide');
     if (!dlg) return;
@@ -1702,36 +1713,10 @@
   window.addEventListener('hashchange', render);
 
   async function boot() {
-    // Capture OAuth result fragments before the router sees them.
-    const mTok = (location.hash || '').match(/[#&]token=([^&]+)/);
-    if (mTok) {
-      storage.localSet('ag_token', decodeURIComponent(mTok[1]));
-      history.replaceState(null, '', location.pathname + location.search + '#/');
-    } else if (/^#auth=failed/.test(location.hash || '')) {
-      history.replaceState(null, '', location.pathname + location.search + '#/');
-      setTimeout(() => toast(
-        'Google 로그인에 실패했습니다. 다시 시도해 주세요.', 'error'), 50);
-    }
-
-    try {
-      state.user = await api('/auth/me');
-      state.needsAuth = false;
-    } catch (err) {
-      if (err.status === 401) {
-        state.needsAuth = true;
-        clearToken();
-      }
-      state.user = null;
-    }
-    renderHeaderUser();
-
-    $('#btn-logout').addEventListener('click', () => {
-      clearToken();
-      location.href = '/';
-    });
-
+    getDeviceUserId(); // ensure a device UUID exists before the first request
     await checkHealth();
     render();
+    await maybeOnboard(); // blocks the UI until a Gemini key is saved (first run)
   }
 
   boot();

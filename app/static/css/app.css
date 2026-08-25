@@ -838,24 +838,6 @@ button.chip:hover { filter: brightness(.96); box-shadow: 0 0 0 3px rgba(15, 23, 
 .apikey-help:hover { text-decoration: underline; }
 
 /* --------------------------------------------------------------------------
-   Login (OAuth gate)
-   -------------------------------------------------------------------------- */
-.login-page { display: grid; place-items: center; min-height: 70vh; }
-.login-card { max-width: 400px; text-align: center; padding: 34px 26px; }
-.login-brand {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 56px;
-  height: 56px;
-  border-radius: 16px;
-  background: var(--accent-soft);
-  color: var(--accent);
-  margin-bottom: 12px;
-}
-.google-btn svg { flex: 0 0 auto; }
-
-/* --------------------------------------------------------------------------
    API key onboarding manual
    -------------------------------------------------------------------------- */
 .manual-steps {
@@ -866,12 +848,11 @@ button.chip:hover { filter: brightness(.96); box-shadow: 0 0 0 3px rgba(15, 23, 
   font-size: 13.5px;
 }
 .manual-steps code { font-size: 12.5px; }
-.apikey-manual .banner-warn {
+.apikey-manual .banner-warn,
+.apikey-manual .banner-rec {
   display: flex;
   gap: 8px;
   align-items: flex-start;
-  background: var(--amber-soft);
-  color: var(--amber-text);
   border-radius: var(--radius-sm);
   padding: 10px 12px;
   font-size: 13px;

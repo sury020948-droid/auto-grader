@@ -6,11 +6,3 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/health
-    # Multi-tenant auth — set these in the Render dashboard to enable Google login:
-    # envVars:
-    #   - key: GOOGLE_CLIENT_ID
-    #     sync: false
-    #   - key: GOOGLE_CLIENT_SECRET
-    #     sync: false
-    #   - key: SESSION_SECRET   # optional; auto-generated per instance if unset
-    #     sync: false

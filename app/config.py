@@ -7,11 +7,7 @@ STATIC_DIR = BASE_DIR / "app" / "static"
 MAX_UPLOAD_BYTES = 15 * 1024 * 1024
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
-# --- Multi-tenant auth (Google OAuth) ---
-GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
-GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
-
-# --- Gemini (server-wide FALLBACK only; users normally bring their own key) ---
+# --- Gemini (server-wide FALLBACK only; devices normally bring their own key) ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "") or os.environ.get(
     "GOOGLE_API_KEY", ""
 )

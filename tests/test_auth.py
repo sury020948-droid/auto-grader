@@ -1,148 +1,101 @@
-"""Auth tokens, login flow states, and strict tenant isolation."""
+"""Per-device auth (X-Device-User-Id header) and strict tenant isolation."""
+
+import uuid
 
 import pytest
 from fastapi.testclient import TestClient
 
-from app import config
-from app.services import auth_tokens as at
+DEVICE_HEADER = "X-Device-User-Id"
 
 
-@pytest.fixture(autouse=True)
-def _oauth_off(monkeypatch):
-    monkeypatch.delenv("GOOGLE_CLIENT_ID", raising=False)
-    monkeypatch.delenv("GOOGLE_CLIENT_SECRET", raising=False)
+def device_headers(device_id: str | None = None) -> dict[str, str]:
+    return {DEVICE_HEADER: device_id or str(uuid.uuid4())}
 
 
-class TestTokenService:
-    def test_roundtrip(self):
-        token = at.issue_token(42)
-        assert at.verify_token(token) == 42
-
-    def test_tampered_payload_rejected(self):
-        token = at.issue_token(42)
-        body, sig = token.split(".")
-        assert at.verify_token(f"{body}x.{sig}") is None
-
-    def test_wrong_secret_rejected(self, monkeypatch):
-        token = at.issue_token(7)
-        monkeypatch.setenv("SESSION_SECRET", "another-secret")
-        assert at.verify_token(token) is None
-
-    def test_expired_rejected(self):
-        token = at.issue_token(7, ttl_secs=-10)
-        assert at.verify_token(token) is None
-
-    def test_garbage_rejected(self):
-        for bad in ("", "abc", "a.b.c", ".."):
-            assert at.verify_token(bad) is None
-
-
-class TestLocalMode:
-    def test_me_reports_local_user(self, client):
-        data = client.get("/api/auth/me").json()
-        assert data["oauth_enabled"] is False
-        assert data["name"] == "로컬 사용자"
-
-    def test_dev_token_authenticates(self, client):
-        r = client.post("/api/auth/dev-token")
-        assert r.status_code == 200
-        token = r.json()["token"]
-        res = client.get(
-            "/api/auth/me", headers={"Authorization": f"Bearer {token}"}
-        ).json()
-        assert res["id"] == r.json()["user"]["id"]
-
-    def test_config_endpoint(self, client):
-        assert client.get("/api/auth/config").json() == {"oauth_enabled": False}
-
-
-class TestOAuthRequiredMode:
+class TestDeviceHeaderRequired:
     @pytest.fixture()
-    def oauth_client(self, client, monkeypatch, tmp_path):
-        monkeypatch.setenv("AUTO_GRADER_DATA_DIR", str(tmp_path / "d2"))
-        monkeypatch.setenv("GOOGLE_CLIENT_ID", "cid")
-        monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "csec")
+    def raw_client(self, tmp_path, monkeypatch):
+        """Same data dir as `client`, but sends no device header by default."""
+        monkeypatch.setenv("AUTO_GRADER_DATA_DIR", str(tmp_path / "data"))
         from app.main import create_app
 
         app = create_app()
         with TestClient(app) as c:
             yield c
 
-    def test_unauthenticated_401(self, oauth_client):
-        assert oauth_client.get("/api/workbooks").status_code == 401
-        assert oauth_client.get("/api/auth/me").status_code == 401
+    def test_missing_header_rejected(self, raw_client):
+        r = raw_client.get("/api/workbooks")
+        assert r.status_code == 401
+        assert DEVICE_HEADER in r.json()["detail"]
 
-    def test_invalid_bearer_401(self, oauth_client):
-        r = oauth_client.get(
-            "/api/workbooks", headers={"Authorization": "Bearer nope"}
-        )
+    @pytest.mark.parametrize("bad", ["not-a-uuid", "12345", "zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz"])
+    def test_malformed_header_400(self, raw_client, bad):
+        r = raw_client.get("/api/workbooks", headers=device_headers(bad))
+        assert r.status_code == 400
+
+    def test_blank_header_treated_as_missing(self, raw_client):
+        r = raw_client.get("/api/workbooks", headers={DEVICE_HEADER: "   "})
         assert r.status_code == 401
 
-    def test_valid_token_passes(self, oauth_client):
-        # seed a user directly then present a valid token
-        from app.db import connect
+    def test_valid_uuid_accepted(self, client):
+        assert client.post("/api/workbooks", json={"title": "t"}).status_code == 201
 
+
+class TestDeviceIdentity:
+    def test_same_device_across_restarts_sees_same_data(
+        self, client, device_id, tmp_path, monkeypatch
+    ):
+        wid = client.post("/api/workbooks", json={"title": "내 문제집"}).json()["id"]
+
+        from app.main import create_app
+
+        monkeypatch.setenv("AUTO_GRADER_DATA_DIR", str(tmp_path / "data"))
+        with TestClient(create_app(), headers=device_headers(device_id)) as c2:
+            books = c2.get("/api/workbooks").json()
+            assert [b["id"] for b in books] == [wid]
+
+    def test_uuid_format_normalized(self, tmp_path, monkeypatch):
+        """Case/braces/hyphen variants of one UUID must map to the same user."""
+        base = uuid.uuid4()
+        variants = [
+            str(base),
+            str(base).upper(),
+            f"{{{base}}}",
+            str(base).replace("-", ""),
+        ]
+        monkeypatch.setenv("AUTO_GRADER_DATA_DIR", str(tmp_path / "data"))
+        from app.db import connect, get_or_create_device_user, init_db
+
+        init_db()
         conn = connect()
-        uid = int(
-            conn.execute(
-                "INSERT INTO users(google_sub, email) VALUES ('g-x', 'x@t')"
-            ).lastrowid
-        )
-        conn.commit()
-        conn.close()
-        r = oauth_client.get(
-            "/api/workbooks",
-            headers={"Authorization": f"Bearer {at.issue_token(uid)}"},
-        )
-        assert r.status_code == 200
+        try:
+            uids = {get_or_create_device_user(conn, v)["id"] for v in variants}
+        finally:
+            conn.close()
+        assert len(uids) == 1
 
 
 class TestTenantIsolation:
-    @pytest.fixture()
-    def two_user_apps(self, client):
-        """User A uses the default local user via `client`; user B overrides."""
-        from app.db import connect
-        from app.deps import get_current_user
-        from app.main import create_app
+    def test_workbooks_invisible_across_devices(self, client, other_device_client):
+        wid = client.post("/api/workbooks", json={"title": "A의 워크북"}).json()["id"]
+        books_b = other_device_client.get("/api/workbooks").json()
+        assert all(b["id"] != wid for b in books_b)
+        assert other_device_client.get(f"/api/workbooks/{wid}").status_code == 404
 
-        wid_a = client.post("/api/workbooks", json={"title": "A의 워크북"}).json()["id"]
-
-        conn = connect()
-        uid_b = int(
-            conn.execute(
-                "INSERT INTO users(google_sub, email) VALUES ('g-b', 'b@t')"
-            ).lastrowid
-        )
-        conn.commit()
-        conn.close()
-
-        app_b = create_app()
-        app_b.dependency_overrides[get_current_user] = lambda: {
-            "id": uid_b,
-            "gemini_api_key": "",
-        }
-        return wid_a, TestClient(app_b)
-
-    def test_workbooks_invisible_across_users(self, client, two_user_apps):
-        wid_a, client_b = two_user_apps
-        books_b = client_b.get("/api/workbooks").json()
-        assert all(b["id"] != wid_a for b in books_b)
-        assert client_b.get(f"/api/workbooks/{wid_a}").status_code == 404
-
-    def test_cross_user_delete_blocked(self, client, two_user_apps):
-        wid_a, client_b = two_user_apps
-        assert client_b.delete(f"/api/workbooks/{wid_a}").status_code == 404
+    def test_cross_device_delete_blocked(self, client, other_device_client):
+        wid = client.post("/api/workbooks", json={"title": "A의 워크북"}).json()["id"]
+        assert other_device_client.delete(f"/api/workbooks/{wid}").status_code == 404
         # A's data still intact
-        assert client.get(f"/api/workbooks/{wid_a}").status_code == 200
+        assert client.get(f"/api/workbooks/{wid}").status_code == 200
 
-    def test_sections_and_attempts_scoped(self, client, two_user_apps):
-        wid_a, client_b = two_user_apps
+    def test_sections_and_attempts_scoped(self, client, other_device_client):
+        wid = client.post("/api/workbooks", json={"title": "A의 워크북"}).json()["id"]
         pv = client.post(
             "/api/extract-text",
             json={"raw_text": "Day 01\n1. 3 2. 4 3. 1"},
         ).json()
         sid = client.post(
-            f"/api/workbooks/{wid_a}/sections/import",
+            f"/api/workbooks/{wid}/sections/import",
             json={
                 "structure": "headers",
                 "header_type": "day",
@@ -157,17 +110,46 @@ class TestTenantIsolation:
             "/api/attempts", json={"section_id": sid, "answers": {"1": "3"}}
         ).json()
 
-        assert client_b.get(f"/api/sections/{sid}").status_code == 404
+        assert other_device_client.get(f"/api/sections/{sid}").status_code == 404
         assert (
-            client_b.get(f"/api/sections/{sid}/attempts").status_code == 404
-        ) or client_b.get(f"/api/sections/{sid}/attempts").json() == []
-        assert client_b.get(f"/api/attempts/{att['id']}").status_code == 404
+            other_device_client.get(f"/api/sections/{sid}/attempts").status_code
+            == 404
+        ) or other_device_client.get(f"/api/sections/{sid}/attempts").json() == []
         assert (
-            client_b.post(
+            other_device_client.get(f"/api/attempts/{att['id']}").status_code == 404
+        )
+        assert (
+            other_device_client.post(
                 "/api/attempts",
                 json={"section_id": sid, "answers": {"1": "9"}},
             ).status_code
             == 404
         )
 
-        _ = config  # imported for parity with other modules under test
+    def test_gemini_keys_isolated_per_device(self, client, other_device_client):
+        client.post(
+            "/api/settings/api-key", json={"api_key": "AIzaSyD-device-a-key-000"}
+        )
+        status = other_device_client.get("/api/settings/api-key").json()
+        assert status["set"] is False
+
+
+class TestRemovedOAuthSurface:
+    def test_auth_endpoints_gone(self, client):
+        for path in (
+            "/api/auth/config",
+            "/api/auth/me",
+            "/api/auth/google/start",
+            "/api/auth/dev-token",
+        ):
+            assert client.get(path).status_code in (404, 405), path
+
+    def test_health_serves_anonymous_callers(self, tmp_path, monkeypatch):
+        """Load balancers hit /api/health without a device header."""
+        monkeypatch.setenv("AUTO_GRADER_DATA_DIR", str(tmp_path / "data"))
+        from app.main import create_app
+
+        with TestClient(create_app()) as c:
+            data = c.get("/api/health").json()
+        assert data["status"] == "ok"
+        assert "oauth_enabled" not in data

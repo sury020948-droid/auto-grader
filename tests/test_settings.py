@@ -136,12 +136,54 @@ class TestSaveApiKey:
         assert r.status_code == 200
         assert captured["k"] == header_key
 
-    def test_rejects_non_aiza_format(self, client):
+    def test_accepts_non_aiza_format(self, client):
+        """Any non-empty string is saved — Google's API validates the key."""
+        key = "AQAbcd123notAGoogleKey"
+        r = client.post("/api/settings/api-key", json={"api_key": key})
+        assert r.status_code == 200
+        data = r.json()
+        assert data == {"set": True, "source": "user", "masked": "AQAbcd...eKey"}
+        assert key in str(data) or data["masked"]
+
+    def test_header_override_accepts_non_aiza(self, client, monkeypatch):
+        payload = {
+            "workbook_title": "",
+            "groups": [
+                {
+                    "main_category": "Day 01",
+                    "items": [{"number": 1, "type": "numeric", "answer": "7"}],
+                }
+            ],
+            "notes": [],
+        }
+
+        class FakeResponse:
+            text = json.dumps(payload)
+
+        class FakeModels:
+            def generate_content(self, **kwargs):
+                return FakeResponse()
+
+        class FakeClient:
+            models = FakeModels()
+
+        from app.services import gemini as gemini_service
+
+        captured = {}
+
+        def fake_client(key):
+            captured["k"] = key
+            return FakeClient()
+
+        monkeypatch.setattr(gemini_service, "_client", fake_client)
+        header_key = "AQ-header-supplied-oauth-style-key-000000"
         r = client.post(
-            "/api/settings/api-key", json={"api_key": "AQAbcd123notAGoogleKey"}
+            "/api/extract",
+            files={"file": ("key.png", b"\x89PNG fake", "image/png")},
+            headers={"X-Gemini-Api-Key": header_key},
         )
-        assert r.status_code == 400
-        assert "AIza" in r.json()["detail"]
+        assert r.status_code == 200
+        assert captured["k"] == header_key
 
     def test_blank_rejected(self, client):
         assert (
@@ -176,42 +218,25 @@ class TestDeleteApiKey:
 
 
 class TestPersistence:
-    def test_survives_restart(self, client):
+    def test_survives_restart(self, client, device_id):
         client.post("/api/settings/api-key", json={"api_key": FULL_KEY})
         from app.main import create_app
 
-        with TestClient(create_app()) as c:
+        with TestClient(
+            create_app(), headers={"X-Device-User-Id": device_id}
+        ) as c:
             assert c.get("/api/health").json()["gemini_available"] is True
             status = c.get("/api/settings/api-key").json()
         assert status["source"] == "user"
 
-    def test_keys_are_isolated_per_user(self, client):
-        """Two users must never see or use each other's Gemini keys."""
-        from app.db import connect
-        from app.deps import get_current_user
-        from app.main import create_app
-
+    def test_keys_are_isolated_per_device(self, client, other_device_client):
+        """Two devices must never see or use each other's Gemini keys."""
         client.post("/api/settings/api-key", json={"api_key": FULL_KEY})
 
-        # second user via Google sub
-        conn = connect()
-        user_b = conn.execute(
-            "INSERT INTO users(google_sub, email, name)"
-            " VALUES ('g-b', 'b@test', 'B')"
-        )
-        conn.commit()
-        uid_b = int(user_b.lastrowid)
-        conn.close()
-
-        app = create_app()
-        app.dependency_overrides[get_current_user] = lambda: {
-            "id": uid_b,
-            "email": "b@test",
-            "name": "B",
-            "gemini_api_key": "",
-        }
-        with TestClient(app) as c2:
-            status = c2.get("/api/settings/api-key").json()
-            assert status["set"] is False  # B does not see A's key
-            health = c2.get("/api/health").json()
-            assert health["gemini_available"] is False  # nor its usage
+        status = other_device_client.get("/api/settings/api-key").json()
+        assert status["set"] is False  # B does not see A's key
+        health = other_device_client.get("/api/health").json()
+        assert health["gemini_available"] is False  # nor its usage
+        # ...while the owning device still does
+        assert client.get("/api/settings/api-key").json()["set"] is True
+        assert client.get("/api/health").json()["gemini_available"] is True

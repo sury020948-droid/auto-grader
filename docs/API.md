@@ -2,29 +2,30 @@
 
 Base URL: `http://<host>:8000` · All bodies JSON unless noted. Errors: `{ "detail": string }` with proper HTTP codes.
 
-## Authentication
+## Authentication (per-device)
 
-When `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` are configured, every `/api/*`
-endpoint (except the auth ones) requires `Authorization: Bearer <token>`.
-Tokens are issued by the Google OAuth flow; without OAuth config the app runs
-in single-user LOCAL mode (shared 'local' user, no token required).
+Every client generates a UUIDv4 once, stores it locally, and sends it as the
+`X-Device-User-Id` header on **every** `/api/*` request. The server maps that
+UUID to an isolated user row — workbooks, sections, attempts and the saved
+Gemini key never cross device boundaries.
 
-- `GET /api/auth/config` → `{ "oauth_enabled": bool }`
-- `GET /api/auth/me` → current user `{ id, email, name, picture, oauth_enabled }`
-- `GET /api/auth/google/start?origin=<frontend-origin>` → 307 to Google consent
-  (state cookie set); callback returns to `origin/#token=<jwt-like-hmac>`
-- `GET /api/auth/google/callback` → validates state + code, upserts user, redirects
-  with token (or `#auth=failed`)
-- `POST /api/auth/dev-token` → local-mode only: `{ "token", "user" }`
+- Missing header → `401 { "detail": "..." }`
+- Malformed (non-UUID) value → `400`
+- First sight of a new UUID lazily creates its user row
 
-All workbook/section/attempt data is strictly scoped to the requesting user.
+Exception: `GET /api/health` also serves anonymous callers (load-balancer
+checks) and then only reports the server-wide env fallback key.
 
 ## Gemini API key resolution (photo extraction)
 
 Precedence per request:
-1. `X-Gemini-API-Key` request header (must start with `AIza`)
-2. The authenticated user's saved key (`/api/settings/api-key`)
+1. `X-Gemini-API-Key` request header (any non-empty string)
+2. The device's saved key (`/api/settings/api-key`)
 3. Server-wide env fallback (`GEMINI_API_KEY`/`GOOGLE_API_KEY`)
+
+No prefix/format validation is performed server-side; any non-empty value is
+accepted and the actual Google AI API response is the source of truth for
+validity (`401` with a clear message when Google rejects the key).
 
 ## Objects
 
@@ -68,13 +69,15 @@ AttemptResult { "id": 7, "section_id": 3, "taken_at": "...",
 
 ### System
 - `GET /api/health` → `{ "status": "ok", "gemini_available": true, "model": "gemini-3.6-flash" }`
+  (with `X-Device-User-Id` present, `gemini_available` reflects that device's key;
+  anonymous callers get the env-fallback view only)
 
-### Settings (Gemini API key)
-- `GET /api/settings/api-key` → `{ "set": true, "source": "app"|"env", "masked": "AIzaSy...cdef" }`
+### Settings (Gemini API key, per device)
+- `GET /api/settings/api-key` → `{ "set": true, "source": "user"|"server", "masked": "AIzaSy...cdef" }`
   (raw key is never returned; `masked`/`source` are `null` when unset)
-- `POST /api/settings/api-key` body `{ "api_key": "AIza..." }` → same status object.
-  Persists to `data/settings.json` (chmod 600) and takes precedence over env vars.
-  (400 blank after trim, 422 validation)
+- `POST /api/settings/api-key` body `{ "api_key": "<any non-empty string>" }` → same status object.
+  Persists on the device's user row in SQLite; takes precedence over env vars.
+  No format validation (`AQ...` etc. accepted). (400 blank after trim, 422 validation)
 - `DELETE /api/settings/api-key` → removes the saved key and falls back to
   `GEMINI_API_KEY`/`GOOGLE_API_KEY` env vars (if any)
 

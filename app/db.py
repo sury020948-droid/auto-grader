@@ -1,4 +1,5 @@
 import sqlite3
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -8,10 +9,7 @@ from .config import db_path
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    google_sub TEXT UNIQUE,
-    email TEXT NOT NULL DEFAULT '',
-    name TEXT NOT NULL DEFAULT '',
-    picture TEXT NOT NULL DEFAULT '',
+    device_id TEXT UNIQUE,
     gemini_api_key TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
@@ -100,8 +98,8 @@ def get_conn() -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
-def init_db(local_user: dict[str, str] | None = None) -> None:
-    """Create schema and migrate legacy single-tenant tables securely."""
+def init_db() -> None:
+    """Create schema and migrate pre-existing databases to device-scoped users."""
     import json
     from pathlib import Path
 
@@ -117,22 +115,23 @@ def init_db(local_user: dict[str, str] | None = None) -> None:
             if col not in cols:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} INTEGER")
 
-        # --- ensure at least one user exists; backfill orphan rows ---
-        local = local_user or {}
-        row = conn.execute("SELECT id FROM users ORDER BY id LIMIT 1").fetchone()
-        if not row:
+        # --- migration: databases created under the removed Google OAuth
+        #     schema carry google_sub/email/... columns instead of device_id ---
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(users)")]
+        if "device_id" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN device_id TEXT")
+
+        # --- ensure one legacy user exists; backfill orphan rows to it ---
+        row = conn.execute(
+            "SELECT id FROM users WHERE device_id = 'legacy-device'"
+        ).fetchone()
+        if row:
+            uid = int(row["id"])
+        else:
             cur = conn.execute(
-                "INSERT INTO users(google_sub, email, name)"
-                " VALUES (?, ?, ?)",
-                (
-                    "local",
-                    local.get("email", "local@auto-grader"),
-                    local.get("name", "로컬 사용자"),
-                ),
+                "INSERT INTO users(device_id) VALUES ('legacy-device')"
             )
             uid = int(cur.lastrowid)
-        else:
-            uid = int(row["id"])
 
         for table in _MIGRATE_COLUMNS:
             conn.execute(
@@ -140,13 +139,17 @@ def init_db(local_user: dict[str, str] | None = None) -> None:
             )
 
         conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_device"
+            " ON users(device_id)"
+        )
+        conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_workbooks_user"
             " ON workbooks(user_id)"
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_attempts_user ON attempts(user_id)"
         )
-        # keep legacy settings.json key usable as the local user's key
+        # keep the legacy settings.json key usable under the legacy user
         legacy_file = Path(db_path()).parent / "settings.json"
         if legacy_file.exists():
             try:
@@ -173,42 +176,40 @@ def get_user(conn: sqlite3.Connection, uid: int) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
-def get_user_by_sub(conn: sqlite3.Connection, sub: str) -> dict[str, Any] | None:
-    row = conn.execute(
-        "SELECT * FROM users WHERE google_sub = ?", (sub,)
-    ).fetchone()
-    return dict(row) if row else None
-
-
-def upsert_google_user(
-    conn: sqlite3.Connection,
-    sub: str,
-    email: str,
-    name: str,
-    picture: str,
+def get_or_create_device_user(
+    conn: sqlite3.Connection, device_id: str
 ) -> dict[str, Any]:
-    existing = get_user_by_sub(conn, sub)
-    if existing:
-        conn.execute(
-            "UPDATE users SET email = ?, name = ?, picture = ? WHERE id = ?",
-            (
-                email or existing["email"],
-                name or existing["name"],
-                picture,
-                existing["id"],
-            ),
+    """Return the user bound to this device UUID, creating it on first sight.
+
+    The id is canonicalized here (lowercase, hyphenated) so that case/brace/
+    hyphen variants of one UUID always map to a single user row. A concurrent
+    INSERT racing this one is absorbed by re-reading the winner's row.
+    """
+    try:
+        canonical = str(uuid.UUID(str(device_id)))
+    except ValueError:
+        raise ValueError(f"invalid device id: {device_id!r}") from None
+
+    row = conn.execute(
+        "SELECT * FROM users WHERE device_id = ?", (canonical,)
+    ).fetchone()
+    if row:
+        return dict(row)
+    try:
+        cur = conn.execute(
+            "INSERT INTO users(device_id) VALUES (?)", (canonical,)
         )
-        existing.update(
-            email=email or existing["email"],
-            name=name or existing["name"],
-            picture=picture,
-        )
-        return existing
-    cur = conn.execute(
-        "INSERT INTO users(google_sub, email, name, picture) VALUES (?, ?, ?, ?)",
-        (sub, email, name, picture),
-    )
-    return get_user(conn, int(cur.lastrowid))
+        uid = int(cur.lastrowid)
+    except sqlite3.IntegrityError:
+        row = conn.execute(
+            "SELECT * FROM users WHERE device_id = ?", (canonical,)
+        ).fetchone()
+        if not row:  # pragma: no cover - defensive
+            raise
+        return dict(row)
+    user = get_user(conn, uid)
+    assert user is not None  # just inserted
+    return user
 
 
 def set_user_api_key(conn: sqlite3.Connection, uid: int, api_key: str) -> None:

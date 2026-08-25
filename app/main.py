@@ -6,10 +6,10 @@ from fastapi.staticfiles import StaticFiles
 
 from . import config
 from .config import STATIC_DIR, upload_dir
-from .db import init_db
-from .deps import get_current_user, oauth_enabled
+from .db import get_conn, init_db
+from .deps import try_current_user
 from .errors import AppError
-from .routers import attempts, auth, extraction, settings, workbooks
+from .routers import attempts, extraction, settings, workbooks
 from .services import gemini
 
 
@@ -27,24 +27,30 @@ def create_app() -> FastAPI:
     async def app_error_handler(request: Request, exc: AppError):
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
-    app.include_router(auth.router, prefix="/api")
     app.include_router(workbooks.router, prefix="/api")
     app.include_router(extraction.router, prefix="/api")
     app.include_router(attempts.router, prefix="/api")
     app.include_router(settings.router, prefix="/api")
 
     @app.get("/api/health")
-    def health(user: dict = Depends(get_current_user)):
+    def health(
+        user: dict | None = Depends(try_current_user),
+        conn=Depends(get_conn),
+    ):
         import os
 
-        key = user.get("gemini_api_key") or os.environ.get(
-            "GEMINI_API_KEY", ""
-        ) or os.environ.get("GOOGLE_API_KEY", "")
+        key = ""
+        if user is not None:
+            key = user.get("gemini_api_key") or ""
+        key = (
+            key
+            or os.environ.get("GEMINI_API_KEY", "")
+            or os.environ.get("GOOGLE_API_KEY", "")
+        )
         return {
             "status": "ok",
             "gemini_available": gemini.available(key),
             "model": config.GEMINI_MODEL,
-            "oauth_enabled": oauth_enabled(),
         }
 
     app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
