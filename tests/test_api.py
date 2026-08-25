@@ -1,5 +1,7 @@
 import pytest
 
+from app import config
+from app.errors import GeminiResponseError
 from app.services import gemini as gemini_service
 
 DAY_SAMPLE = (
@@ -158,6 +160,37 @@ class TestExtraction:
         monkeypatch.setattr(gemini_service, "_client", lambda key: client_holder)
         return client_holder
 
+    def _patch_gemini_sequenced(self, monkeypatch, items, model="gemini-test"):
+        """Like `_patch_gemini_client` but returns one item per Gemini call,
+        in order — a dict payload becomes a JSON response, an Exception
+        instance is raised instead (simulating one bad image in a batch)."""
+        import json
+
+        class FakeResponse:
+            def __init__(self, payload):
+                self.text = json.dumps(payload)
+
+        class FakeModels:
+            def __init__(self):
+                self.calls = []
+
+            def generate_content(self, **kwargs):
+                self.calls.append(kwargs)
+                item = items[len(self.calls) - 1]
+                if isinstance(item, Exception):
+                    raise item
+                return FakeResponse(item)
+
+        class FakeClient:
+            def __init__(self):
+                self.models = FakeModels()
+
+        client_holder = FakeClient()
+        monkeypatch.setattr(gemini_service.config, "GEMINI_API_KEY", "test-key")
+        monkeypatch.setattr(gemini_service.config, "GEMINI_MODEL", model)
+        monkeypatch.setattr(gemini_service, "_client", lambda key: client_holder)
+        return client_holder
+
     def test_image_extract_via_gemini(self, client, monkeypatch):
         holder = self._patch_gemini_client(monkeypatch, TABLE_PAYLOAD)
         png = b"\x89PNG\r\n\x1a\nfake"
@@ -246,6 +279,114 @@ class TestExtraction:
         ).json()
         assert a1["score"] == 2
         assert a2["score"] == 2
+
+    def test_multi_image_merges_continuous_ranges(self, client, monkeypatch):
+        """Two images posted under repeated 'file' fields merge into one
+        continuous answer key — header index/line and entry line span both
+        images without overlap, and notes from both images appear."""
+        payload1 = {
+            "workbook_title": "쎈 미적분",
+            "groups": [{
+                "main_category": "Day 01",
+                "sub_category": None,
+                "items": [
+                    {"number": 1, "type": "numeric", "answer": "1"},
+                    {"number": 2, "type": "numeric", "answer": "2"},
+                ],
+            }],
+            "notes": ["첫 사진 노트"],
+        }
+        payload2 = {
+            "workbook_title": "",
+            "groups": [{
+                "main_category": "Day 02",
+                "sub_category": None,
+                "items": [{"number": 1, "type": "numeric", "answer": "9"}],
+            }],
+            "notes": ["둘째 사진 노트"],
+        }
+        holder = self._patch_gemini_sequenced(monkeypatch, [payload1, payload2])
+        png = b"\x89PNG\r\n\x1a\nfake"
+        r = client.post(
+            "/api/extract",
+            files=[
+                ("file", ("p1.png", png, "image/png")),
+                ("file", ("p2.png", png, "image/png")),
+            ],
+        )
+        assert r.status_code == 200
+        p = r.json()
+        assert len(holder.models.calls) == 2
+        assert p["workbook_title"] == "쎈 미적분"
+        assert [(h["label"], h["index"], h["line"]) for h in p["headers"]] == [
+            ("Day 01", 0, 0),
+            ("Day 02", 1, 2),
+        ]
+        assert [e["number"] for e in p["entries"]] == [1, 2, 1]
+        assert [e["line"] for e in p["entries"]] == [0, 1, 2]
+        notes = [i["message"] for i in p["issues"] if i["kind"] == "noise"]
+        assert any("첫 사진 노트" in n for n in notes)
+        assert any("둘째 사진 노트" in n for n in notes)
+
+    def test_single_image_still_works_as_before(self, client, monkeypatch):
+        """A lone file under the repeated-field-capable 'file' param must
+        behave exactly as the pre-existing single-image path did."""
+        self._patch_gemini_client(monkeypatch, TABLE_PAYLOAD)
+        png = b"\x89PNG\r\n\x1a\nfake"
+        r = client.post(
+            "/api/extract",
+            files={"file": ("key.png", png, "image/png")},
+        )
+        assert r.status_code == 200
+        p = r.json()
+        assert p["headers"] == [
+            {"type": "day", "label": "Day 01", "index": 0, "line": 0}
+        ]
+        assert [e["number"] for e in p["entries"]] == [1, 2, 3, 4]
+
+    def test_max_images_exceeded_400_before_gemini_call(self, client, monkeypatch):
+        holder = self._patch_gemini_sequenced(
+            monkeypatch, [TABLE_PAYLOAD] * (config.MAX_EXTRACT_IMAGES + 1)
+        )
+        png = b"\x89PNG\r\n\x1a\nfake"
+        files = [
+            ("file", (f"p{i}.png", png, "image/png"))
+            for i in range(config.MAX_EXTRACT_IMAGES + 1)
+        ]
+        r = client.post("/api/extract", files=files)
+        assert r.status_code == 400
+        assert holder.models.calls == []  # rejected before any Gemini call
+
+    def test_multi_image_bad_type_415_before_gemini_call(self, client, monkeypatch):
+        holder = self._patch_gemini_sequenced(monkeypatch, [TABLE_PAYLOAD, TABLE_PAYLOAD])
+        png = b"\x89PNG\r\n\x1a\nfake"
+        r = client.post(
+            "/api/extract",
+            files=[
+                ("file", ("good.png", png, "image/png")),
+                ("file", ("bad.txt", b"hello", "text/plain")),
+            ],
+        )
+        assert r.status_code == 415
+        assert holder.models.calls == []  # rejected before any Gemini call
+
+    def test_multi_image_second_failure_fails_whole_request(self, client, monkeypatch):
+        """Fail-fast: an error on image 2 fails the whole request (same
+        502 a single bad image gives today) — no silent partial result."""
+        holder = self._patch_gemini_sequenced(
+            monkeypatch, [TABLE_PAYLOAD, GeminiResponseError("이미지 2 인식 실패")]
+        )
+        png = b"\x89PNG\r\n\x1a\nfake"
+        r = client.post(
+            "/api/extract",
+            files=[
+                ("file", ("p1.png", png, "image/png")),
+                ("file", ("p2.png", png, "image/png")),
+            ],
+        )
+        assert r.status_code == 502
+        assert "이미지 2 인식 실패" in r.json()["detail"]
+        assert len(holder.models.calls) == 2  # stopped right after the failure
 
     def test_import_rejects_non_mc_numeric_answer(self, client, wb):
         preview = client.post(

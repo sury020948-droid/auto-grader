@@ -329,3 +329,64 @@ def extract_answer_key(
         "model": config.GEMINI_MODEL,
         "raw_text": "\n".join(f'{e["number"]}. {e["answer_display"]}' for e in entries),
     }
+
+
+def extract_answer_key_batch(
+    images: list[tuple[bytes, str]],
+    api_key: str | None = None,
+) -> dict[str, Any]:
+    """Run `extract_answer_key` once per image, in order, and merge the
+    results into one continuous answer key.
+
+    Fail-fast: an error on any image (bad response, size guard, network
+    failure, ...) raises immediately and aborts the rest of the batch, same
+    as a single-image call today. For a single image this is an identity
+    transform — see `_merge_results`.
+    """
+    results = [
+        extract_answer_key(image_bytes, content_type, api_key=api_key)
+        for image_bytes, content_type in images
+    ]
+    return _merge_results(results)
+
+
+def _merge_results(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Concatenate per-image `extract_answer_key` outputs into one answer key.
+
+    Rebases each image's entry `line` and header `index` by running totals
+    from the images already merged, so line/index form one continuous
+    sequence across images — the same rebasing `extract_answer_key` already
+    applies across groups *within* one image, applied one level up. With a
+    single result, every offset is 0, so this is a pure identity transform
+    and `_merge_results([r])` reproduces `r` exactly.
+    """
+    entries: list[dict[str, Any]] = []
+    headers: list[dict[str, Any]] = []
+    groups: list[dict[str, Any]] = []
+    notes: list[str] = []
+    title = ""
+    line_offset = 0
+    index_offset = 0
+    for result in results:
+        for e in result["entries"]:
+            entries.append({**e, "line": e["line"] + line_offset})
+        for h in result["headers"]:
+            headers.append(
+                {**h, "index": h["index"] + index_offset, "line": h["line"] + line_offset}
+            )
+        groups.extend(result["groups"])
+        notes.extend(result["notes"])
+        if not title:
+            title = result["workbook_title"]
+        line_offset += len(result["entries"])
+        index_offset += len(result["headers"])
+
+    return {
+        "workbook_title": title,
+        "groups": groups,
+        "entries": entries,
+        "headers": headers,
+        "notes": notes,
+        "model": results[0]["model"] if results else None,
+        "raw_text": "\n".join(f'{e["number"]}. {e["answer_display"]}' for e in entries),
+    }

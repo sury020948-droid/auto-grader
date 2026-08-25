@@ -190,7 +190,7 @@
    * ------------------------------------------------------------------ */
   const state = {
     preview: null,   // last ExtractionPreview
-    file: null,      // selected File in extract view
+    files: [],       // selected Files (1..N) in extract view
     onboarded: false // Gemini key confirmed available for this device
   };
 
@@ -388,6 +388,11 @@
   async function viewExtract(wid) {
     if (!wid) return renderExtractNoWorkbook();
 
+    // Fresh screen, fresh selection — a leftover pick from a previous visit
+    // (e.g. another workbook's extract screen) must never silently ride
+    // along into this workbook's upload.
+    state.files = [];
+
     let wbTitle = `워크북 #${wid}`;
     api(`/workbooks/${wid}`).then((wb) => {
       if (wb && wb.title) {
@@ -427,10 +432,9 @@
             <label class="dropzone" id="dropzone" for="inp-file">
               <span class="dz-icon">${ic('upload', 30)}</span>
               <strong>정답지 사진을 끌어다 놓거나 눌러서 선택</strong>
-              <span class="dz-hint">JPG · PNG 지원 · 정답 페이지를 또렷하게 찍어주세요</span>
-              <img id="file-thumb" class="thumb" alt="" hidden>
-              <span class="file-meta" id="file-name" hidden></span>
-              <input type="file" id="inp-file" accept="image/jpeg,image/png,image/jpg">
+              <span class="dz-hint">JPG · PNG 지원 · 여러 장 선택 가능 · 정답 페이지를 또렷하게 찍어주세요</span>
+              <div id="file-list" class="file-list" hidden></div>
+              <input type="file" id="inp-file" accept="image/jpeg,image/png,image/jpg" multiple>
             </label>
             <div class="extract-actions">
               <button class="btn" id="btn-extract-photo" disabled>${ic('target')} 답안 추출하기</button>
@@ -471,11 +475,19 @@
 
     const dropzone = $('#dropzone');
     const fileInput = $('#inp-file');
-    const thumb = $('#file-thumb');
-    const fileNameEl = $('#file-name');
+    const fileListEl = $('#file-list');
     const btnPhoto = $('#btn-extract-photo');
     const btnText = $('#btn-extract-text');
     const taText = $('#inp-raw-text');
+
+    /* blob: object URLs, one per selected File — created lazily and reused
+       across re-renders so accumulating/removing files never leaks URLs. */
+    const fileUrls = new WeakMap();
+    function urlFor(f) {
+      let u = fileUrls.get(f);
+      if (!u) { u = URL.createObjectURL(f); fileUrls.set(f, u); }
+      return u;
+    }
 
     $('#btn-upload-guide').addEventListener('click', () => openUploadGuide());
     let guideSeen = null;
@@ -483,8 +495,8 @@
     if (!guideSeen) openUploadGuide(true);
 
     fileInput.addEventListener('change', () => {
-      const f = fileInput.files && fileInput.files[0];
-      applyFile(f);
+      applyFiles(fileInput.files);
+      fileInput.value = ''; // allow re-picking the same file after removal
     });
 
     ['dragenter', 'dragover'].forEach((ev) =>
@@ -493,33 +505,56 @@
       dropzone.addEventListener(ev, (e) => { e.preventDefault(); dropzone.classList.remove('dragover'); }));
     dropzone.addEventListener('drop', (e) => {
       const dt = e.dataTransfer;
-      const f = dt && dt.files && dt.files[0];
-      if (f) applyFile(f);
+      if (dt && dt.files && dt.files.length) applyFiles(dt.files);
     });
 
-    function applyFile(f) {
-      if (!f) return;
-      if (!/^image\/(jpeg|png)$/.test(f.type)) {
-        toast('JPG 또는 PNG 이미지만 업로드할 수 있습니다.', 'error');
-        return;
-      }
-      state.file = f;
-      btnPhoto.disabled = false;
-      fileNameEl.hidden = false;
-      fileNameEl.textContent = f.name;
-      if (thumb.src && thumb.src.startsWith('blob:')) URL.revokeObjectURL(thumb.src);
-      thumb.src = URL.createObjectURL(f);
-      thumb.hidden = false;
+    /* Validate and append newly chosen/dropped files to the current
+       selection (repeated drag-drops / picker rounds accumulate) rather
+       than replacing it — the natural multi-photo upload pattern. */
+    function applyFiles(fileList) {
+      const incoming = Array.from(fileList || []);
+      if (!incoming.length) return;
+      let rejected = 0;
+      incoming.forEach((f) => {
+        if (/^image\/(jpeg|png)$/.test(f.type)) state.files.push(f);
+        else rejected += 1;
+      });
+      if (rejected) toast('JPG 또는 PNG 이미지만 업로드할 수 있습니다.', 'error');
+      renderFileList();
     }
 
+    function renderFileList() {
+      btnPhoto.disabled = state.files.length === 0;
+      fileListEl.hidden = state.files.length === 0;
+      fileListEl.innerHTML = state.files.map((f, idx) => `
+        <div class="file-chip" data-idx="${idx}">
+          <img class="thumb" src="${esc(urlFor(f))}" alt="">
+          <span class="file-meta">${esc(f.name)}</span>
+          <button type="button" class="file-chip-remove" data-remove-file="${idx}"
+                  aria-label="${esc(f.name)} 제거">${ic('x', 13)}</button>
+        </div>`).join('');
+    }
+
+    fileListEl.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-remove-file]');
+      if (!btn) return;
+      const idx = Number(btn.getAttribute('data-remove-file'));
+      const [removed] = state.files.splice(idx, 1);
+      if (removed) {
+        const u = fileUrls.get(removed);
+        if (u) { URL.revokeObjectURL(u); fileUrls.delete(removed); }
+      }
+      renderFileList();
+    });
+
     btnPhoto.addEventListener('click', async () => {
-      if (!state.file) return;
+      if (!state.files.length) return;
       const bannerSlot = $('#photo-banner-slot');
       bannerSlot.innerHTML = '';
       setPending(btnPhoto, true, '추출 중…');
       try {
         const fd = new FormData();
-        fd.append('file', state.file);
+        state.files.forEach((f) => fd.append('file', f));
         const preview = await api('/extract', { method: 'POST', formData: fd });
         state.preview = preview;
         renderPreview(preview, wid);

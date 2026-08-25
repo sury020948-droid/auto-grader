@@ -3,7 +3,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Path, UploadFile
 
 from .. import db as dal
-from ..config import ALLOWED_IMAGE_TYPES
+from ..config import ALLOWED_IMAGE_TYPES, MAX_EXTRACT_IMAGES
 from ..db import get_conn
 from ..deps import get_current_user
 from ..errors import AppError, GeminiUnavailableError
@@ -47,8 +47,8 @@ def _build_preview(
     return out
 
 
-def _gemini_preview(data: bytes, content_type: str, api_key: str):
-    result = gemini.extract_answer_key(data, content_type, api_key=api_key)
+def _gemini_preview(images: list[tuple[bytes, str]], api_key: str):
+    result = gemini.extract_answer_key_batch(images, api_key=api_key)
     entries = [
         {
             "number": e["number"],
@@ -76,21 +76,27 @@ def _gemini_preview(data: bytes, content_type: str, api_key: str):
 
 @router.post("/extract")
 async def extract(
-    file: UploadFile | None = File(default=None),
+    file: list[UploadFile] | None = File(default=None),
     raw_text: str | None = Form(default=None),
     x_gemini_api_key: Annotated[str | None, Header()] = None,
     user: dict = Depends(get_current_user),
     conn=Depends(get_conn),
 ):
-    if file is not None and file.filename:
-        if file.content_type not in ALLOWED_IMAGE_TYPES:
-            raise AppError(415, "지원하지 않는 파일 형식입니다. JPG/PNG를 업로드해 주세요.")
-        data = await file.read()
+    files = [f for f in (file or []) if f.filename]
+    if files:
+        if len(files) > MAX_EXTRACT_IMAGES:
+            raise AppError(
+                400, f"사진은 한 번에 최대 {MAX_EXTRACT_IMAGES}장까지 업로드할 수 있습니다."
+            )
+        for f in files:
+            if f.content_type not in ALLOWED_IMAGE_TYPES:
+                raise AppError(415, "지원하지 않는 파일 형식입니다. JPG/PNG를 업로드해 주세요.")
+        images = [(await f.read(), f.content_type or "") for f in files]
         key = resolve_user_key(user, conn, header_key=x_gemini_api_key)
         if not key:
             raise GeminiUnavailableError()
         try:
-            return _gemini_preview(data, file.content_type or "", key)
+            return _gemini_preview(images, key)
         except GeminiUnavailableError:
             raise
         except AppError:

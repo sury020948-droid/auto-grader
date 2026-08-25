@@ -321,6 +321,151 @@ class TestExtractAnswerKey:
             gemini.extract_answer_key(b"img", "image/png")
 
 
+class SequencedModels:
+    """Returns one item per call, in call order — a FakeResponse is returned,
+    an Exception instance is raised instead. Used to simulate a multi-image
+    batch where each image gets its own (possibly failing) Gemini call."""
+
+    def __init__(self, items):
+        self.items = list(items)
+        self.calls = 0
+
+    def generate_content(self, **kwargs):
+        self.calls += 1
+        item = self.items[self.calls - 1]
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+class TestExtractAnswerKeyBatch:
+    def test_single_image_matches_extract_answer_key(self, monkeypatch):
+        """N=1 must be a byte-identical case of the batch path (pure identity
+        merge — every offset is 0), not a separate code path."""
+        resp = FakeResponse(json.dumps(_payload(TABLE_LAYOUT, title="쎈 미적분")))
+        _patch(monkeypatch, FlakyModels(0, response=resp))
+        direct = gemini.extract_answer_key(b"img-bytes", "image/jpeg")
+        batched = gemini.extract_answer_key_batch([(b"img-bytes", "image/jpeg")])
+        assert batched == direct
+
+    def test_two_images_offsets_are_cumulative(self, monkeypatch):
+        """Image 2's header must be offset by image 1's HEADER count (2), not
+        its entry count (3) — the two differ here specifically to catch that
+        class of bug."""
+        resp1 = FakeResponse(json.dumps(_payload(title="사진1", groups=[
+            {
+                "main_category": "Day 01",
+                "sub_category": None,
+                "items": [{"number": 1, "type": "numeric", "answer": "1"}],
+            },
+            {
+                "main_category": "Day 02",
+                "sub_category": None,
+                "items": [
+                    {"number": 1, "type": "numeric", "answer": "2"},
+                    {"number": 2, "type": "numeric", "answer": "3"},
+                ],
+            },
+        ])))
+        resp2 = FakeResponse(json.dumps(_payload(title="", groups=[
+            {
+                "main_category": "Day 03",
+                "sub_category": None,
+                "items": [{"number": 1, "type": "numeric", "answer": "9"}],
+            },
+        ])))
+        models = SequencedModels([resp1, resp2])
+        _patch(monkeypatch, models)
+        out = gemini.extract_answer_key_batch(
+            [(b"img1", "image/jpeg"), (b"img2", "image/png")]
+        )
+        assert models.calls == 2
+        assert out["workbook_title"] == "사진1"  # first non-blank title wins
+        assert [(h["label"], h["index"], h["line"]) for h in out["headers"]] == [
+            ("Day 01", 0, 0),
+            ("Day 02", 1, 1),
+            ("Day 03", 2, 3),
+        ]
+        assert [(e["number"], e["line"]) for e in out["entries"]] == [
+            (1, 0), (1, 1), (2, 2), (1, 3),
+        ]
+        assert out["raw_text"].split("\n") == ["1. 1", "1. 2", "2. 3", "1. 9"]
+
+    def test_second_image_failure_aborts_whole_batch(self, monkeypatch):
+        """Fail-fast: an error on image 2 raises immediately (same exception
+        type a single-image failure raises today) and never attempts a 3rd
+        call — no silent partial result."""
+        resp1 = FakeResponse(
+            json.dumps(_payload([{"number": 1, "type": "numeric", "answer": "1"}]))
+        )
+        models = SequencedModels([resp1, GeminiResponseError("이미지 2 인식 실패")])
+        _patch(monkeypatch, models)
+        with pytest.raises(GeminiResponseError):
+            gemini.extract_answer_key_batch(
+                [(b"img1", "image/jpeg"), (b"img2", "image/png")]
+            )
+        assert models.calls == 2
+
+
+class TestMergeResults:
+    """Direct unit tests of the offset arithmetic against hand-built
+    per-image results, independent of any Gemini mocking."""
+
+    def _result(self, title, label, entries, notes=None):
+        return {
+            "workbook_title": title,
+            "groups": [{"main_category": label, "sub_category": None, "entries": []}],
+            "entries": entries,
+            "headers": [{"type": "chapter", "label": label, "index": 0, "line": 0}],
+            "notes": notes or [],
+            "model": "gemini-test",
+            "raw_text": "\n".join(f'{e["number"]}. {e["answer_display"]}' for e in entries),
+        }
+
+    def test_offsets_cumulative_across_synthetic_results(self):
+        r1 = self._result(
+            "제목1", "A",
+            [{"number": 1, "qtype": "numeric", "answer": "1", "answer_display": "1", "line": 0}],
+            notes=["첫 사진 노트"],
+        )
+        r2 = self._result(
+            "", "B",
+            [
+                {"number": 1, "qtype": "numeric", "answer": "9", "answer_display": "9", "line": 0},
+                {"number": 2, "qtype": "numeric", "answer": "8", "answer_display": "8", "line": 1},
+            ],
+            notes=["둘째 사진 노트"],
+        )
+        out = gemini._merge_results([r1, r2])
+        assert out["workbook_title"] == "제목1"
+        assert [(h["label"], h["index"], h["line"]) for h in out["headers"]] == [
+            ("A", 0, 0),
+            ("B", 1, 1),
+        ]
+        assert [(e["number"], e["line"]) for e in out["entries"]] == [(1, 0), (1, 1), (2, 2)]
+        assert out["notes"] == ["첫 사진 노트", "둘째 사진 노트"]
+        assert out["raw_text"] == "1. 1\n1. 9\n2. 8"
+        assert out["model"] == "gemini-test"
+
+    def test_identity_for_single_result(self):
+        r = self._result(
+            "제목", "A",
+            [{"number": 5, "qtype": "numeric", "answer": "5", "answer_display": "5", "line": 0}],
+        )
+        assert gemini._merge_results([r]) == r
+
+    def test_blank_first_title_falls_back_to_next_non_blank(self):
+        r1 = self._result(
+            "", "A",
+            [{"number": 1, "qtype": "numeric", "answer": "1", "answer_display": "1", "line": 0}],
+        )
+        r2 = self._result(
+            "둘째 제목", "B",
+            [{"number": 1, "qtype": "numeric", "answer": "2", "answer_display": "2", "line": 0}],
+        )
+        assert gemini._merge_results([r1, r2])["workbook_title"] == "둘째 제목"
+
+
 class TestPromptContract:
     def test_prompt_mentions_only_two_types(self):
         low = gemini.SYSTEM_PROMPT.lower()

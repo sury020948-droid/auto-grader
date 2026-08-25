@@ -6,6 +6,7 @@ STATIC_DIR = BASE_DIR / "app" / "static"
 
 MAX_UPLOAD_BYTES = 15 * 1024 * 1024
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
+MAX_EXTRACT_IMAGES = 10
 
 # --- Gemini (server-wide FALLBACK only; devices normally bring their own key) ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "") or os.environ.get(

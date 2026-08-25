@@ -99,7 +99,7 @@ pasted text ─▶ parser(marker scan + glue 복원) ─▶ normalizer(객관식
 |---|---|---|
 | GET | `/api/health` | 상태 + Gemini 사용 가능 여부/모델 |
 | POST/GET/DELETE | `/api/workbooks…` | 워크북 CRUD |
-| POST | `/api/extract` | 사진(multipart `file`)→Gemini Vision 또는 텍스트(form `raw_text`) → 추출 프리뷰 + 구조 추천 |
+| POST | `/api/extract` | 사진 1장 이상(multipart `file`, 반복 가능)→Gemini Vision 또는 텍스트(form `raw_text`) → 추출 프리뷰 + 구조 추천 |
 | POST | `/api/extract-text` | JSON `{raw_text}` → 동일 프리뷰 |
 | POST | `/api/workbooks/{id}/sections/import` | 확정된 구조로 섹션+정답 저장 |
 | GET | `/api/sections/{id}` | 문항 번호만 제공 (**정답 미포함** — 입력 중 부정행위 방지) |

@@ -92,9 +92,21 @@ AttemptResult { "id": 7, "section_id": 3, "taken_at": "...",
 ### Extraction
 - `POST /api/extract` — multipart/form-data only
   - `file=<image jpg/png/webp>` **or** form field `raw_text=1. 3 2. 4 ...`
+  - `file` may be repeated 1..N times in the same request (same field name,
+    one part per photo) to register an answer key spread across multiple
+    photos in one call — each image is sent to Gemini Vision and the results
+    are merged in upload order into a single `ExtractionPreview`; a lone
+    `file` part behaves exactly like the single-image case always has.
+    `headers[].index`/`.line` and `entries[].line` form one continuous
+    sequence spanning all uploaded images, the same way they already span
+    multiple printed sections found within one image.
+  - Fail-fast: an error on any one image (unreadable, no valid entries, ...)
+    fails the whole request — no partial/silent-drop result.
   - Photo → Gemini Vision structured extraction (multiple-choice + numeric answers only)
-  - → `200 ExtractionPreview` (400 no input; 415 bad file type; 503 `GEMINI_API_KEY` missing;
-    502 Gemini call/parse failure or no valid entries found; 422 nothing parsed from text)
+  - → `200 ExtractionPreview` (400 no input, or more than `MAX_EXTRACT_IMAGES`
+    (10) files in one request; 415 bad file type on any file; 503
+    `GEMINI_API_KEY` missing; 502 Gemini call/parse failure or no valid
+    entries found on any file; 422 nothing parsed from text)
 - `POST /api/extract-text` body `{ "raw_text": "1. 3 2. 4 ..." }` → same `ExtractionPreview`
 - `POST /api/workbooks/{wid}/sections/conflicts` — same body as `sections/import`
   (resolutions ignored) → `{ "conflicts": [ { "incoming_label": "Day 01",
