@@ -34,6 +34,7 @@ def _serialize_attempt(att: dict[str, Any]) -> dict[str, Any]:
         "total": att["total"],
         "score": att["score"],
         "percent": att["percent"],
+        "is_full_attempt": bool(att.get("is_full_attempt", True)),
         "results": results,
         "wrong_numbers": [r["number"] for r in results if r["status"] == "incorrect"],
         "unanswered_numbers": [
@@ -99,6 +100,7 @@ def create_attempt(
         graded["total"],
         graded["percent"],
         graded["results"],
+        is_full_attempt=payload.merge_attempt_id is None,
     )
     saved = dal.get_attempt(conn, aid, uid)
     out = _serialize_attempt(saved)

@@ -314,6 +314,38 @@ class TestImportAndGrading:
         full = client.get(f"/api/attempts/{att['id']}").json()
         assert len(full["results"]) == 5
 
+    def test_ordinary_attempts_are_full_and_update_stats(self, client, wb):
+        """Regression for the partial-retry flag: an ordinary attempt (no
+        merge_attempt_id) must be is_full_attempt: true and must keep
+        updating section/workbook history and best/recent stats exactly as
+        before this feature existed."""
+        r = _import_headers(client, wb)
+        sid = r.json()["sections"][0]["id"]
+
+        a1 = client.post(
+            "/api/attempts", json={"section_id": sid, "answers": {"1": "3"}}
+        ).json()
+        assert a1["is_full_attempt"] is True
+
+        a2 = client.post(
+            "/api/attempts",
+            json={"section_id": sid, "answers": {"1": "3", "2": "4"}},
+        ).json()
+        assert a2["is_full_attempt"] is True
+        assert a2["percent"] > a1["percent"]
+
+        history = client.get(f"/api/sections/{sid}/attempts").json()
+        assert len(history) == 2  # both ordinary attempts counted
+
+        stats = client.get(f"/api/workbooks/{wb}/stats").json()
+        sec = next(s for s in stats["sections"] if s["section_id"] == sid)
+        assert sec["attempt_count"] == 2
+        assert sec["latest_percent"] == a2["percent"]
+        assert sec["best_percent"] == a2["percent"]
+
+        fetched = client.get(f"/api/attempts/{a1['id']}").json()
+        assert fetched["is_full_attempt"] is True
+
     def test_import_chunks_structure(self, client, wb):
         preview = client.post("/api/extract-text", json={"raw_text": FLAT_SAMPLE}).json()
         entries = [

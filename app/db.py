@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS attempts (
     taken_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
     score INTEGER NOT NULL DEFAULT 0,
     total INTEGER NOT NULL DEFAULT 0,
-    percent REAL NOT NULL DEFAULT 0
+    percent REAL NOT NULL DEFAULT 0,
+    is_full_attempt INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS attempt_answers (
     attempt_id INTEGER NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
@@ -120,6 +121,16 @@ def init_db() -> None:
         cols = [r["name"] for r in conn.execute("PRAGMA table_info(users)")]
         if "device_id" not in cols:
             conn.execute("ALTER TABLE users ADD COLUMN device_id TEXT")
+
+        # --- migration: pre-existing databases predate the partial-retry
+        #     flag; backfill every existing row as a full attempt (they all
+        #     were, since the partial concept didn't exist yet) ---
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(attempts)")]
+        if "is_full_attempt" not in cols:
+            conn.execute(
+                "ALTER TABLE attempts ADD COLUMN is_full_attempt"
+                " INTEGER NOT NULL DEFAULT 1"
+            )
 
         # --- ensure one legacy user exists; backfill orphan rows to it ---
         row = conn.execute(
@@ -233,7 +244,8 @@ def list_workbooks(conn: sqlite3.Connection, uid: int) -> list[dict[str, Any]]:
                (SELECT COUNT(*) FROM answer_keys k JOIN sections s2 ON k.section_id = s2.id
                  WHERE s2.workbook_id = w.id) AS problem_count,
                (SELECT a.percent FROM attempts a JOIN sections s3 ON a.section_id = s3.id
-                 WHERE s3.workbook_id = w.id ORDER BY a.id DESC LIMIT 1) AS latest_percent
+                 WHERE s3.workbook_id = w.id AND a.is_full_attempt = 1
+                 ORDER BY a.id DESC LIMIT 1) AS latest_percent
         FROM workbooks w WHERE w.user_id = ? ORDER BY w.id DESC
         """,
         (uid,),
@@ -267,7 +279,8 @@ def get_workbook_summary(
                (SELECT COUNT(*) FROM answer_keys k JOIN sections s2 ON k.section_id = s2.id
                  WHERE s2.workbook_id = w.id) AS problem_count,
                (SELECT a.percent FROM attempts a JOIN sections s3 ON a.section_id = s3.id
-                 WHERE s3.workbook_id = w.id ORDER BY a.id DESC LIMIT 1) AS latest_percent
+                 WHERE s3.workbook_id = w.id AND a.is_full_attempt = 1
+                 ORDER BY a.id DESC LIMIT 1) AS latest_percent
         FROM workbooks w WHERE w.id = ? AND w.user_id = ?
         """,
         (wid, uid),
@@ -292,10 +305,12 @@ def list_sections(
         """
         SELECT s.id, s.workbook_id, s.label, s.position,
                (SELECT COUNT(*) FROM answer_keys k WHERE k.section_id = s.id) AS problem_count,
-               (SELECT COUNT(*) FROM attempts a WHERE a.section_id = s.id) AS attempt_count,
+               (SELECT COUNT(*) FROM attempts a WHERE a.section_id = s.id
+                 AND a.is_full_attempt = 1) AS attempt_count,
                (SELECT a.percent FROM attempts a WHERE a.section_id = s.id
-                 ORDER BY a.id DESC LIMIT 1) AS latest_percent,
-               (SELECT MAX(a.percent) FROM attempts a WHERE a.section_id = s.id) AS best_percent
+                 AND a.is_full_attempt = 1 ORDER BY a.id DESC LIMIT 1) AS latest_percent,
+               (SELECT MAX(a.percent) FROM attempts a WHERE a.section_id = s.id
+                 AND a.is_full_attempt = 1) AS best_percent
         FROM sections s
         JOIN workbooks w ON w.id = s.workbook_id
         WHERE s.workbook_id = ? AND w.user_id = ?
@@ -454,11 +469,12 @@ def create_attempt(
     total: int,
     percent: float,
     results: list[dict[str, Any]],
+    is_full_attempt: bool = True,
 ) -> int:
     cur = conn.execute(
-        "INSERT INTO attempts(user_id, section_id, score, total, percent)"
-        " VALUES (?, ?, ?, ?, ?)",
-        (uid, sid, score, total, percent),
+        "INSERT INTO attempts(user_id, section_id, score, total, percent,"
+        " is_full_attempt) VALUES (?, ?, ?, ?, ?, ?)",
+        (uid, sid, score, total, percent, int(is_full_attempt)),
     )
     aid = int(cur.lastrowid)
     conn.executemany(
@@ -497,7 +513,7 @@ def list_attempts(conn: sqlite3.Connection, sid: int, uid: int) -> list[dict[str
         SELECT a.id, a.section_id, a.taken_at, a.score, a.total, a.percent
         FROM attempts a JOIN sections s ON s.id = a.section_id
         JOIN workbooks w ON w.id = s.workbook_id
-        WHERE a.section_id = ? AND w.user_id = ?
+        WHERE a.section_id = ? AND w.user_id = ? AND a.is_full_attempt = 1
         ORDER BY a.id DESC
         """,
         (sid, uid),
@@ -518,6 +534,7 @@ def top_missed(
         JOIN sections s ON s.id = a.section_id
         JOIN workbooks w ON w.id = s.workbook_id
         WHERE w.id = ? AND w.user_id = ? AND aa.status != 'correct'
+              AND a.is_full_attempt = 1
         GROUP BY s.id, aa.number
         ORDER BY count DESC, aa.number
         LIMIT ?

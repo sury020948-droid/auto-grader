@@ -60,6 +60,7 @@ ExtractionPreview { "engine": "gemini-vision",     // or "paste" when raw_text g
 
 AttemptResult { "id": 7, "section_id": 3, "taken_at": "...",
                 "total": 20, "score": 18, "percent": 90.0,
+                "is_full_attempt": true,  // false for a merge/retry attempt — see below
                 "results": [ { "number": 1, "qtype": "numeric", "expected": "3", "given": "3", "status": "correct" },   // correct|incorrect|unanswered
                              { "number": 2, "qtype": "multiple_choice", "expected": "1,4", "given": "4,1", "status": "correct" } ],
                 "wrong_numbers": [5], "unanswered_numbers": [],
@@ -131,6 +132,12 @@ AttemptResult { "id": 7, "section_id": 3, "taken_at": "...",
   With `merge_attempt_id`, the base attempt's given answers are overlaid by the new
   ones so previously solved questions keep their correct status — retry flow.
   Response gains `"merged_from": 7` when used; base attempt history is untouched.
+  A `merge_attempt_id` retry is saved with `is_full_attempt: false` — it remains
+  fully fetchable via `GET /attempts/{aid}`, but is excluded from
+  `GET /sections/{sid}/attempts`, `attempt_count`, `latest_percent`, `best_percent`,
+  and `top_missed`, so retrying wrong questions only never counts as a new official
+  attempt or moves best/recent stats. Ordinary attempts (no `merge_attempt_id`) are
+  always `is_full_attempt: true`.
   With `answered_only: true` (default `false`), blank/skipped questions are excluded
   from `total` and `percent` instead of counting against the score — `results` still
   lists them with `status: "unanswered"` and they still appear in `unanswered_numbers`,

@@ -44,6 +44,7 @@ class TestRetryMerge:
         assert base["score"] == 3
         assert set(base["wrong_numbers"]) == {2}
         assert set(base["unanswered_numbers"]) == {5}
+        assert base["is_full_attempt"] is True
 
         misses = client.post(
             "/api/attempts/from-misses", json={"attempt_id": base["id"]}
@@ -73,6 +74,7 @@ class TestRetryMerge:
         assert by_num[2]["given"] == "④" and by_num[2]["status"] == "correct"
         assert by_num[5]["status"] == "unanswered"
         assert merged["merged_from"] == base["id"]
+        assert merged["is_full_attempt"] is False  # partial retry, not official
 
         old = client.get(f"/api/attempts/{base['id']}").json()
         assert old["score"] == 3  # history untouched
@@ -94,6 +96,66 @@ class TestRetryMerge:
         by_num = {r["number"]: r["status"] for r in merged["results"]}
         assert by_num[1] == "correct"
         assert by_num[2] == "unanswered"
+
+    def test_retry_excluded_from_history_and_aggregates(self, client, two_sections):
+        """Partial retries (merge_attempt_id set) must be persisted and stay
+        fetchable by id, but must not count as a new official attempt in
+        section/workbook history or best/recent stats."""
+        wid, s1, _ = two_sections
+
+        base = client.post(
+            "/api/attempts",
+            json={
+                "section_id": s1,
+                "answers": {"1": "3", "2": "9", "3": "1", "4": "5"},
+            },
+        ).json()
+        assert base["score"] == 3
+        assert base["percent"] == 60.0
+        assert base["is_full_attempt"] is True
+
+        hist_before = client.get(f"/api/sections/{s1}/attempts").json()
+        assert len(hist_before) == 1
+
+        stats_before = client.get(f"/api/workbooks/{wid}/stats").json()
+        sec_before = next(s for s in stats_before["sections"] if s["section_id"] == s1)
+        assert sec_before["attempt_count"] == 1
+        assert sec_before["latest_percent"] == sec_before["best_percent"] == 60.0
+
+        # Retry fixes both remaining misses (Q2, Q5) -> a perfect 5/5, 100%.
+        retry = client.post(
+            "/api/attempts",
+            json={
+                "section_id": s1,
+                "answers": {"2": "4", "5": "2"},
+                "merge_attempt_id": base["id"],
+            },
+        ).json()
+        assert retry["score"] == 5
+        assert retry["percent"] == 100.0
+        assert retry["is_full_attempt"] is False
+
+        # (a) section attempt-history list is unchanged by the retry.
+        hist_after = client.get(f"/api/sections/{s1}/attempts").json()
+        assert hist_after == hist_before
+
+        # (b) section + workbook aggregates are unchanged by the retry, even
+        # though the retry's own percent (100%) beats the base attempt's (60%)
+        # -- best/latest must NOT silently move off the back of a partial retry.
+        stats_after = client.get(f"/api/workbooks/{wid}/stats").json()
+        sec_after = next(s for s in stats_after["sections"] if s["section_id"] == s1)
+        assert sec_after == sec_before
+        assert sec_after["attempt_count"] == 1
+        assert sec_after["latest_percent"] == sec_after["best_percent"] == 60.0
+
+        wb_after = client.get(f"/api/workbooks/{wid}").json()
+        assert wb_after["latest_percent"] == 60.0
+
+        # (c) the retry attempt itself stays fully persisted and fetchable by
+        # id -- it's excluded from aggregation, not silently dropped.
+        fetched = client.get(f"/api/attempts/{retry['id']}").json()
+        assert fetched["percent"] == 100.0
+        assert fetched["is_full_attempt"] is False
 
     def test_merge_requires_same_section(self, client, two_sections):
         _, s1, s2 = two_sections
