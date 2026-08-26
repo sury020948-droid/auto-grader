@@ -644,6 +644,13 @@ button.chip:hover { filter: brightness(.96); box-shadow: 0 0 0 3px rgba(15, 23, 
   box-shadow: 0 0 0 3px rgba(79, 70, 229, .15);
 }
 .ans-input.filled { border-color: var(--accent-border); background: #FBFBFF; }
+.ans-hint {
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--muted);
+  text-align: center;
+  word-break: break-word;
+}
 
 .quiz-footer {
   position: sticky;

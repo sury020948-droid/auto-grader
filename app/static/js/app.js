@@ -1275,36 +1275,53 @@
   async function viewSolve(sid) {
     const sec = await api(`/sections/${sid}`);
 
-    let numbers = (sec.numbers || []).map(Number).sort((a, b) => a - b);
-    let retryMode = false;
-    let retryList = [];
-    let retryBaseAttempt = null;
-    const storedSid = storage.get('retry_section_id');
-    const storedNums = storage.get('retry_numbers');
-    const storedBase = storage.get('retry_base_attempt');
-    if (storedSid === String(sid) && storedNums) {
-      try {
-        const arr = JSON.parse(storedNums);
-        if (Array.isArray(arr) && arr.length) {
-          const set = new Set(numbers);
-          retryList = arr.map(Number).filter((n) => set.has(n)).sort((a, b) => a - b);
-          if (retryList.length) {
-            retryMode = true;
-            numbers = retryList;
-            retryBaseAttempt = storedBase ? Number(storedBase) : null;
-          }
-        }
-      } catch { /* corrupted storage → normal mode */ }
+    // Server-driven retry/resume: no client-side bookkeeping. A 200 here
+    // means a session for this section is already open; a 404 means this
+    // is a fresh first submission.
+    let openSession = null;
+    try {
+      openSession = await api(`/sections/${sid}/session`);
+    } catch (err) {
+      if (err.status !== 404) throw err;
     }
+
+    const resumeMode = openSession !== null;
+    const latest = resumeMode ? openSession.latest_attempt : null;
+    // "Which numbers still need retrying" and "what was answered last time"
+    // both come straight from the open session's latest submission snapshot.
+    const remainingResults = resumeMode
+      ? (latest?.results || [])
+          .filter((r) => r.status !== 'correct')
+          .sort((a, b) => Number(a.number) - Number(b.number))
+      : [];
+    const givenByNumber = new Map(
+      remainingResults.map((r) => [Number(r.number), r.given || ''])
+    );
+    const submissionCount = resumeMode ? (openSession.submission_count || 0) : 0;
+
+    const numbers = resumeMode
+      ? remainingResults.map((r) => Number(r.number))
+      : (sec.numbers || []).map(Number).sort((a, b) => a - b);
+    // Retried everything correct and left without finishing: no numbers left
+    // to show, so render a finish-the-session state instead of an empty grid.
+    const allCaughtUp = resumeMode && numbers.length === 0;
 
     const answeredOnlyDefault = storage.localGet('ag_answered_only') === '1';
 
-    const inputsHtml = numbers.map((n) => `
+    const inputsHtml = numbers.map((n) => {
+      const hintHtml = resumeMode
+        ? `<span class="ans-hint" id="ans-hint-${n}">이전 답: ${
+            givenByNumber.get(n) ? esc(givenByNumber.get(n)) : '(미응답)'
+          }</span>`
+        : '';
+      return `
       <li class="ans-cell">
         <span class="ans-num" id="ans-num-${n}">${n}번</span>
         <input class="ans-input" type="text" inputmode="text" autocomplete="off"
-               data-number="${n}" aria-labelledby="ans-num-${n}" maxlength="30">
-      </li>`).join('');
+               data-number="${n}" aria-labelledby="ans-num-${n}${resumeMode ? ` ans-hint-${n}` : ''}" maxlength="30">
+        ${hintHtml}
+      </li>`;
+    }).join('');
 
     view.innerHTML = `
       <section class="page" aria-label="채점 세션">
@@ -1312,18 +1329,25 @@
         <div class="page-head">
           <div>
             <h1 class="page-title" tabindex="-1">${esc(sec.label || '채점')}</h1>
-            <p class="sub">${esc(sec.workbook_title || '')} · 문항 ${numbers.length}개</p>
+            <p class="sub">${esc(sec.workbook_title || '')} · ${allCaughtUp ? '재도전 문항 모두 정답' : `문항 ${numbers.length}개`}</p>
           </div>
         </div>
 
-        ${retryMode ? `
+        ${resumeMode && !allCaughtUp ? `
         <div class="banner banner-rec quiz-banner">
           ${ic('refresh')}
-          <span><strong>틀린 문제 재도전 모드</strong> — ${numbers.length}개 문항만 풀면 됩니다.
-            <button class="btn btn-ghost btn-sm" id="btn-cancel-retry" style="margin-left:6px;">전체 문항으로 풀기</button>
-          </span>
+          <span><strong>이어서 채점 중</strong> — 지금까지 ${submissionCount}번 제출했고, ${numbers.length}개 문항이 남았습니다.</span>
         </div>` : ''}
 
+        ${allCaughtUp ? `
+        <div class="card">
+          <div class="all-correct">${ic('check', 18)} 재도전한 문항을 모두 맞혔습니다!</div>
+          <p class="sub" style="margin-top:12px;">지금까지 ${submissionCount}번 제출했습니다. 채점을 끝내면 이번 세션의 결과가 기록에 저장됩니다.</p>
+          <div class="result-actions">
+            <button type="button" class="btn" id="btn-finish-session">${ic('check')} 채점 끝내기</button>
+            <a class="btn btn-secondary" href="#/wb/${sec.workbook_id}">${ic('list')} 목록으로</a>
+          </div>
+        </div>` : `
         <form id="quiz-form" novalidate>
           <label style="display:block; margin-bottom:14px;">
             <input type="checkbox" id="chk-answered-only"${answeredOnlyDefault ? ' checked' : ''}>
@@ -1338,8 +1362,25 @@
               <button type="submit" class="btn" id="btn-submit">${ic('check')} 제출</button>
             </span>
           </footer>
-        </form>
+        </form>`}
       </section>`;
+
+    if (allCaughtUp) {
+      $('#btn-finish-session').addEventListener('click', async (e) => {
+        const btn = e.currentTarget;
+        setPending(btn, true, '처리 중…');
+        try {
+          await api(`/sessions/${openSession.session_id}/finish`, { method: 'POST' });
+          toast('채점을 끝냈습니다.', 'success');
+          location.hash = latest ? `#/attempt/${latest.id}` : `#/wb/${sec.workbook_id}`;
+        } catch (err) {
+          setPending(btn, false);
+          toast(err.message, 'error');
+        }
+      });
+      focusTitle();
+      return;
+    }
 
     const grid = $('.answer-grid', view);
     const inputs = Array.from(grid.querySelectorAll('.ans-input'));
@@ -1383,17 +1424,6 @@
     });
 
     if (inputs.length) inputs[0].focus();
-
-    const cancelRetry = $('#btn-cancel-retry');
-    if (cancelRetry) {
-      cancelRetry.addEventListener('click', () => {
-        storage.remove('retry_numbers');
-        storage.remove('retry_section_id');
-        storage.remove('retry_base_attempt');
-        toast('재도전 모드를 해제했습니다.', 'info');
-        viewSolve(sid);
-      });
-    }
 
     /* --- bulk paste --- */
     $('#btn-bulk').addEventListener('click', () => {
@@ -1454,19 +1484,13 @@
       $('#btn-bulk').disabled = true;
       setPending(submitBtn, true, '채점 중…');
       try {
-        const body = { section_id: sid, answers, answered_only: answeredOnly };
-        if (retryMode && retryBaseAttempt) {
-          // Partial merge: previously correct answers are preserved server-side;
-          // only the re-attempted numbers are updated.
-          body.merge_attempt_id = retryBaseAttempt;
-        }
+        // Retry auto-detection lives entirely server-side: it just looks at
+        // whether this section has an open session (see the load-time check
+        // above), so the client always posts the plain answer set.
         const attempt = await api('/attempts', {
           method: 'POST',
-          body
+          body: { section_id: sid, answers, answered_only: answeredOnly }
         });
-        storage.remove('retry_numbers');
-        storage.remove('retry_section_id');
-        storage.remove('retry_base_attempt');
         location.hash = `#/attempt/${attempt.id}`;
       } catch (err) {
         setPending(submitBtn, false);
