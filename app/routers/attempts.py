@@ -31,9 +31,11 @@ def serialize_attempt(
     it appears.
 
     `session` is the attempt's owning sessions row, when the caller already
-    has it (or can cheaply fetch it) -- it's only used to derive
-    `session_finished`; pass None when unknown (session_finished then reads
-    False rather than guessing).
+    has it (or can cheaply fetch it) -- it's used to derive `session_finished`
+    and to surface the session's frozen `first_percent` alongside this
+    submission's own score, so a retry's results screen can show both without
+    a second round-trip; pass None when unknown (session_finished then reads
+    False, first_percent None, rather than guessing).
     """
     results = [
         {**r, "qtype": canonical_type(r["expected"]) if r["expected"] else None}
@@ -46,6 +48,7 @@ def serialize_attempt(
         "is_first_submission": bool(att.get("is_first_submission", True)),
         "submission_seq": att.get("submission_seq", 1),
         "session_finished": bool(session and session["status"] == "finished"),
+        "first_percent": session["first_percent"] if session else None,
         "taken_at": att["taken_at"],
         "total": att["total"],
         "score": att["score"],

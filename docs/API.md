@@ -61,6 +61,10 @@ ExtractionPreview { "engine": "gemini-vision",     // or "paste" when raw_text g
 
 AttemptResult { "id": 7, "section_id": 3, "session_id": 4,
                 "is_first_submission": true, "submission_seq": 1, "session_finished": false,
+                "first_percent": 90.0,   // the owning session's frozen score (null if session_id is
+                                         // null); on a retry this differs from `percent` above, which
+                                         // is this submission's own -- the results screen uses both to
+                                         // show "this round" vs. "what's actually recorded"
                 "taken_at": "...", "total": 20, "score": 18, "percent": 90.0,
                 "results": [ { "number": 1, "qtype": "numeric", "expected": "3", "given": "3", "status": "correct" },   // correct|incorrect|unanswered
                              { "number": 2, "qtype": "multiple_choice", "expected": "1,4", "given": "4,1", "status": "correct" } ],

@@ -591,7 +591,8 @@ button.chip:hover { filter: brightness(.96); box-shadow: 0 0 0 3px rgba(15, 23, 
   color: var(--muted);
 }
 .sec-stat b { color: var(--text); font-weight: 700; }
-.section-card .btn { margin-top: auto; }
+.section-card > .btn { margin-top: auto; }
+.sec-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: auto; }
 .expand-btn { align-self: flex-start; }
 
 .attempts-panel { border-top: 1px dashed var(--line); padding-top: 10px; }
@@ -672,6 +673,7 @@ button.chip:hover { filter: brightness(.96); box-shadow: 0 0 0 3px rgba(15, 23, 
 /* --------------------------------------------------------------------------
    Results
    -------------------------------------------------------------------------- */
+.retry-note { margin-bottom: 14px; }
 .result-hero { text-align: center; }
 .ring-wrap {
   position: relative;

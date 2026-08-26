@@ -60,9 +60,6 @@
   };
 
   const storage = {
-    get(key) { try { return sessionStorage.getItem(key); } catch { return null; } },
-    set(key, val) { try { sessionStorage.setItem(key, val); } catch { /* noop */ } },
-    remove(key) { try { sessionStorage.removeItem(key); } catch { /* noop */ } },
     localGet(key) { try { return localStorage.getItem(key); } catch { return null; } },
     localSet(key, val) { try { localStorage.setItem(key, val); } catch { /* noop */ } },
     localRemove(key) { try { localStorage.removeItem(key); } catch { /* noop */ } }
@@ -1115,30 +1112,45 @@
         </ul>`
       : `<p class="muted" style="font-size:14px;">아직 채점 기록이 없습니다. 섹션에서 채점을 시작해 보세요.</p>`;
 
-    const sectionCards = sections.map((s) => `
-      <article class="card section-card" data-sid="${Number(s.id)}">
+    const sectionCards = sections.map((s) => {
+      const sid = Number(s.id);
+      // A section with an open session can't be re-entered via a plain
+      // "채점 시작" any more — that would silently start a second, competing
+      // session (blocked server-side by idx_sessions_one_open) instead of
+      // continuing the one already in progress. Route into it explicitly.
+      const actionsHtml = s.open_session_id
+        ? `<div class="sec-actions">
+            <a class="btn" href="#/sec/${sid}/solve">${ic('play')} 이어서 풀기</a>
+            <button type="button" class="btn btn-secondary" data-finish-session="${Number(s.open_session_id)}">
+              ${ic('refresh')} 채점 끝내고 새로 채점하기
+            </button>
+          </div>`
+        : `<a class="btn" href="#/sec/${sid}/solve">${ic('play')} 채점 시작</a>`;
+      return `
+      <article class="card section-card" data-sid="${sid}">
         <div class="sec-head">
           <h3 class="sec-label">${esc(s.label)}</h3>
-          <button class="icon-btn danger sec-del" data-del-sec="${Number(s.id)}"
+          <button class="icon-btn danger sec-del" data-del-sec="${sid}"
                   data-title="${esc(s.label)}" aria-label="${esc(s.label)} 세션 삭제">
             ${ic('trash')}
           </button>
         </div>
         <div class="sec-stats">
           <span>문항 <b>${Number(s.problem_count || 0)}</b></span>
-          <span>응시 <b>${Number(s.attempt_count || 0)}</b>회</span>
+          <span>응시 <b>${Number(s.session_count || 0)}</b>회</span>
         </div>
         <div class="sec-stats">
           <span>최근 <span class="badge ${pctBadgeClass(s.latest_percent)}">${esc(pctText(s.latest_percent, '–'))}</span></span>
           <span>최고 <span class="badge ${pctBadgeClass(s.best_percent)}">${esc(pctText(s.best_percent, '–'))}</span></span>
         </div>
-        <a class="btn" href="#/sec/${Number(s.id)}/solve">${ic('play')} 채점 시작</a>
-        <button class="btn btn-ghost btn-sm expand-btn" data-expand="${Number(s.id)}"
-                aria-expanded="false" aria-controls="attempts-${Number(s.id)}">
+        ${actionsHtml}
+        <button class="btn btn-ghost btn-sm expand-btn" data-expand="${sid}"
+                aria-expanded="false" aria-controls="attempts-${sid}">
           ${ic('list', 14)} 응시 기록 보기
         </button>
-        <div class="attempts-panel" id="attempts-${Number(s.id)}" hidden></div>
-      </article>`).join('');
+        <div class="attempts-panel" id="attempts-${sid}" hidden></div>
+      </article>`;
+    }).join('');
 
     const sectionEmpty = `
       <div class="empty-state" style="padding:36px 16px;">
@@ -1205,6 +1217,25 @@
           await api(`/sections/${sid}`, { method: 'DELETE' });
           toast(`'${title}' 세션이 삭제되었습니다.`, 'success');
           render();
+        } catch (err) {
+          setPending(btn, false);
+          toast(err.message, 'error');
+        }
+      });
+    });
+
+    /* --- "채점 끝내고 새로 채점하기": finish the open session in place, then
+       jump into the same quiz screen, which now starts a blank first
+       submission since no session is open any more --- */
+    view.querySelectorAll('[data-finish-session]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const openSessionId = btn.getAttribute('data-finish-session');
+        const sid = btn.closest('.section-card').getAttribute('data-sid');
+        setPending(btn, true, '처리 중…');
+        try {
+          await api(`/sessions/${openSessionId}/finish`, { method: 'POST' });
+          toast('채점을 끝냈습니다.', 'success');
+          location.hash = `#/sec/${sid}/solve`;
         } catch (err) {
           setPending(btn, false);
           toast(err.message, 'error');
@@ -1557,6 +1588,17 @@
 
     const wbHref = secInfo && secInfo.workbook_id ? `#/wb/${secInfo.workbook_id}` : '#/';
 
+    // A retry's own round can look better (or worse) than what's actually
+    // recorded -- only the session's frozen first-submission score ever
+    // moves history/aggregates, so say so explicitly rather than let a
+    // student assume this ring just replaced it.
+    const isRetry = attempt.is_first_submission === false;
+    const retryNoteHtml = (isRetry && attempt.first_percent != null) ? `
+        <div class="banner banner-rec retry-note" role="note">
+          ${ic('refresh', 15)}
+          <span><strong>첫 제출 기준 점수: ${pctText(attempt.first_percent)}</strong> · 재도전 결과는 기록에 반영되지 않아요.</span>
+        </div>` : '';
+
     view.innerHTML = `
       <section class="page" aria-label="채점 결과">
         ${backLink(wbHref, '목록으로 돌아가기')}
@@ -1567,6 +1609,7 @@
                · ${esc(fmtDate(attempt.taken_at))}</p>
           </div>
         </div>
+        ${retryNoteHtml}
 
         <div class="card result-hero">
           <div class="ring-wrap">
@@ -1595,12 +1638,15 @@
           <p class="sub" style="margin-bottom:12px;">먼저 스스로 고민해 보세요 — 정답은 [정답보기]를 누르면 확인할 수 있어요.</p>
           ${wrongHtml}
           <div class="result-actions">
+            <button class="btn" id="btn-finish-session">${ic('check')} 채점 끝내기</button>
             <button class="btn" id="btn-retry-misses" ${(nWrong + nSkipped) === 0 ? 'disabled title="다시 풀 문제가 없습니다"' : ''}>
               ${ic('refresh')} 틀린 문제만 다시 풀기
             </button>
+            <!-- Leaves the session open server-side on purpose -- "채점 끝내기"
+                 above is the only action that closes it. -->
             <a class="btn btn-secondary" href="${esc(wbHref)}">${ic('list')} 목록으로</a>
-            <button class="btn btn-ghost btn-sm" id="btn-del-session">
-              ${ic('trash', 14)} 이 세션 삭제
+            <button class="btn btn-ghost btn-sm" id="btn-del-section">
+              ${ic('trash', 14)} 섹션 삭제
             </button>
           </div>
         </div>
@@ -1629,31 +1675,39 @@
       });
     });
 
-    /* --- per-session delete from the results screen --- */
-    $('#btn-del-session').addEventListener('click', async () => {
+    /* --- per-section delete from the results screen --- */
+    $('#btn-del-section').addEventListener('click', async () => {
       const label = secInfo?.label || `#${attempt.section_id}`;
-      if (!window.confirm(`'${label}' 세션(섹션)을 삭제할까요?\n이 세션의 정답과 모든 채점 기록이 삭제되며 되돌릴 수 없습니다.`)) return;
+      if (!window.confirm(`'${label}' 섹션을 삭제할까요?\n이 섹션의 정답과 모든 채점 기록이 삭제되며 되돌릴 수 없습니다.`)) return;
       try {
         await api(`/sections/${attempt.section_id}`, { method: 'DELETE' });
-        toast(`'${label}' 세션이 삭제되었습니다.`, 'success');
+        toast(`'${label}' 섹션이 삭제되었습니다.`, 'success');
         location.hash = wbHref;
       } catch (err) {
         toast(err.message, 'error');
       }
     });
 
-    $('#btn-retry-misses').addEventListener('click', async (e) => {
+    // No lookup needed here: this screen only ever renders right after a
+    // submission, so the section's open session (if any) is still the one
+    // this very attempt belongs to -- the quiz screen resumes it and shows
+    // only the not-yet-correct numbers automatically (server-driven, see
+    // GET /sections/{sid}/session in viewSolve). No client-supplied id, no
+    // extra request.
+    $('#btn-retry-misses').addEventListener('click', () => {
+      location.hash = `#/sec/${attempt.section_id}/solve`;
+    });
+
+    /* --- "채점 끝내기": closes the session server-side, then hands off to
+       the finished-session screen. Distinct from "목록으로" above, which
+       deliberately leaves the session open. --- */
+    $('#btn-finish-session').addEventListener('click', async (e) => {
       const btn = e.currentTarget;
-      setPending(btn, true, '준비 중…');
+      setPending(btn, true, '처리 중…');
       try {
-        const res = await api('/attempts/from-misses', {
-          method: 'POST',
-          body: { attempt_id: attempt.id }
-        });
-        storage.set('retry_numbers', JSON.stringify(res.numbers || []));
-        storage.set('retry_section_id', String(res.section_id));
-        storage.set('retry_base_attempt', String(attempt.id));
-        location.hash = `#/sec/${res.section_id}/solve`;
+        await api(`/sessions/${attempt.session_id}/finish`, { method: 'POST' });
+        toast('채점을 끝냈습니다.', 'success');
+        location.hash = `#/session/${attempt.session_id}`;
       } catch (err) {
         setPending(btn, false);
         toast(err.message, 'error');
