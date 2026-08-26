@@ -10,20 +10,6 @@ DAY_SAMPLE = (
     "Day 02\n1. 2 2. 3 3. 4 4. 1 5. 5"
 )
 
-# Section/workbook aggregates (attempt_count, top_missed) were rewired in
-# the sessions-schema/DAL chunk to read from a *finished* `sessions` row
-# instead of attempts.is_full_attempt. That row only comes into being via
-# create_session()/finish_session(), and POST /api/attempts doesn't call
-# either for a live request yet -- wiring session open/retry-detection into
-# that endpoint is the api_layer chunk's job, not this DAL/migration one's.
-# Until it lands, the assertions below are unsatisfiable through the live
-# HTTP path; they stay exactly what should hold once it does.
-_XFAIL_TOP_MISSED_NEEDS_SESSION_WIRING = (
-    "top_missed() now gates on a finished `sessions` row that "
-    "POST /api/attempts doesn't create yet -- pending the api_layer chunk."
-)
-
-
 @pytest.fixture()
 def two_sections(client):
     r = client.post("/api/workbooks", json={"title": "세션 관리 테스트"})
@@ -302,10 +288,12 @@ class TestTopMissedWorkbookScoping:
     the underlying query used to ignore `wid` and mix in misses from every
     workbook the caller owns."""
 
-    @pytest.mark.xfail(reason=_XFAIL_TOP_MISSED_NEEDS_SESSION_WIRING, strict=False)
     def test_top_missed_excludes_other_workbooks(self, client, two_sections):
         wid, s1, _ = two_sections
-        client.post("/api/attempts", json={"section_id": s1, "answers": {"1": "9"}})
+        att = client.post(
+            "/api/attempts", json={"section_id": s1, "answers": {"1": "9"}}
+        ).json()
+        client.post(f"/api/sessions/{att['session_id']}/finish")
 
         other_wid = client.post(
             "/api/workbooks", json={"title": "다른 워크북"}
@@ -324,21 +312,25 @@ class TestTopMissedWorkbookScoping:
             },
         ).json()["sections"]
         other_sid = other_secs[0]["id"]
-        client.post("/api/attempts", json={"section_id": other_sid, "answers": {"1": "9"}})
+        other_att = client.post(
+            "/api/attempts", json={"section_id": other_sid, "answers": {"1": "9"}}
+        ).json()
+        client.post(f"/api/sessions/{other_att['session_id']}/finish")
 
         stats = client.get(f"/api/workbooks/{wid}/stats").json()
         top = stats["top_missed"]
         assert top  # workbook A has its own miss on Q1
         assert all(t["workbook_id"] == wid for t in top)
         assert all(t["section_id"] != other_sid for t in top)
+        assert top[0]["given"] == "9"
 
         other_stats = client.get(f"/api/workbooks/{other_wid}/stats").json()
         other_top = other_stats["top_missed"]
         assert other_top  # workbook B has its own (separate) miss on Q1
         assert all(t["workbook_id"] == other_wid for t in other_top)
         assert all(t["section_id"] != s1 for t in other_top)
+        assert other_top[0]["given"] == "9"
 
-    @pytest.mark.xfail(reason=_XFAIL_TOP_MISSED_NEEDS_SESSION_WIRING, strict=False)
     def test_top_missed_attributes_each_entry_to_its_own_section(
         self, client, two_sections
     ):
@@ -350,10 +342,23 @@ class TestTopMissedWorkbookScoping:
         wid, s1, s2 = two_sections  # Day 01, Day 02 -- see DAY_SAMPLE above
 
         # one miss on Q2 in Day 01 (correct answer there is "4")
-        client.post("/api/attempts", json={"section_id": s1, "answers": {"2": "9"}})
-        # two separate misses on Q2 in Day 02 (correct answer there is "3")
-        client.post("/api/attempts", json={"section_id": s2, "answers": {"2": "9"}})
-        client.post("/api/attempts", json={"section_id": s2, "answers": {"2": "9"}})
+        att1 = client.post(
+            "/api/attempts", json={"section_id": s1, "answers": {"2": "9"}}
+        ).json()
+        client.post(f"/api/sessions/{att1['session_id']}/finish")
+        # two separate misses on Q2 in Day 02 (correct answer there is "3"),
+        # each its own finished session -- a same-session retry would NOT
+        # double the count, since only a session's first submission is ever
+        # counted (see test_top_missed_excludes_a_miss_introduced_only_by_a_retry
+        # below), so two independent sessions are needed to reach count=2.
+        att2a = client.post(
+            "/api/attempts", json={"section_id": s2, "answers": {"2": "9"}}
+        ).json()
+        client.post(f"/api/sessions/{att2a['session_id']}/finish")
+        att2b = client.post(
+            "/api/attempts", json={"section_id": s2, "answers": {"2": "8"}}
+        ).json()
+        client.post(f"/api/sessions/{att2b['session_id']}/finish")
 
         top = client.get(f"/api/workbooks/{wid}/stats").json()["top_missed"]
         q2_rows = [t for t in top if t["number"] == 2]
@@ -365,6 +370,19 @@ class TestTopMissedWorkbookScoping:
         assert by_section[s2]["count"] == 2
         assert by_section[s1]["section_label"] == "Day 01"
         assert by_section[s2]["section_label"] == "Day 02"
+
+        # `given`/`expected` ride along per row: `given` is the student's own
+        # verbatim wrong answer -- s2's is "8", the *most recent* (highest
+        # attempts.id) of its two qualifying misses ("9" then "8"), not the
+        # first. `expected` is the section's actual answer-key display for
+        # that number, which genuinely differs between the two sections.
+        assert by_section[s1]["given"] == "9"
+        assert by_section[s2]["given"] == "8"
+        exp_s1 = next(r["expected"] for r in att1["results"] if r["number"] == 2)
+        exp_s2 = next(r["expected"] for r in att2a["results"] if r["number"] == 2)
+        assert by_section[s1]["expected"] == exp_s1
+        assert by_section[s2]["expected"] == exp_s2
+        assert exp_s1 != exp_s2  # Day 01's Q2 key ("4") differs from Day 02's ("3")
 
         # same workbook throughout -- only the section differs
         assert by_section[s1]["workbook_id"] == wid
@@ -379,6 +397,38 @@ class TestTopMissedWorkbookScoping:
         # Day 01's (count=1), confirming the new columns ride along correctly
         # rather than the grouping/order being disturbed by the extra joins.
         assert top.index(by_section[s2]) < top.index(by_section[s1])
+
+    def test_top_missed_excludes_a_miss_introduced_only_by_a_retry(
+        self, client, two_sections
+    ):
+        """The session-model equivalent of the old is_full_attempt guarantee
+        (a partial retry never counts toward aggregates): top_missed only
+        ever reads a session's frozen FIRST submission. A wrong answer that
+        exists only on a retry -- even one that overwrites a number the
+        first submission had *correct* -- must never surface, since the
+        row it would need (is_first_submission=1 for that number) was never
+        wrong in the first place."""
+        wid, s1, _ = two_sections
+        base = client.post(
+            "/api/attempts",
+            json={
+                "section_id": s1,
+                "answers": {"1": "3", "2": "4", "3": "1", "4": "5", "5": "2"},
+            },
+        ).json()
+        assert base["score"] == 5  # everything correct on submission 1
+
+        # Retry deliberately overwrites the already-correct Q1 with a wrong
+        # answer -- allowed (a retry can freely re-edit any number), but
+        # this mistake only ever exists in submission 2, never submission 1.
+        retry = client.post(
+            "/api/attempts", json={"section_id": s1, "answers": {"1": "9"}}
+        ).json()
+        assert retry["results"][0]["status"] == "incorrect"  # Q1 wrong on try 2 only
+        client.post(f"/api/sessions/{base['session_id']}/finish")
+
+        top = client.get(f"/api/workbooks/{wid}/stats").json()["top_missed"]
+        assert top == []  # the retry-only mistake never surfaces here
 
 
 class TestConflictDetectionApi:

@@ -770,16 +770,40 @@ def list_attempts(conn: sqlite3.Connection, sid: int, uid: int) -> list[dict[str
 def top_missed(
     conn: sqlite3.Connection, wid: int, uid: int, limit: int = 10
 ) -> list[dict[str, Any]]:
+    """Frequently-missed questions for one workbook, one row per (section,
+    number) -- gated (chunk 1) to a miss in the *first* submission of a
+    *finished* session only, same as every other aggregate.
+
+    Each row also carries what the click-through detail modal needs to show
+    "what the student got wrong": `expected` is the *current* authoritative
+    answer_keys.answer_display for that (section, number) -- not the
+    possibly-stale value frozen on the old attempt_answers row, so a
+    since-corrected key is reflected here too. `given` is the answer they
+    submitted on the most recent qualifying miss (highest attempts.id among
+    first-submission rows of a finished session that were actually wrong for
+    this number) -- a retry's own answer never surfaces here, only ever the
+    frozen first submission's, exactly like `count` above.
+    """
     rows = _q(
         conn,
         """
         SELECT aa.number AS number, COUNT(*) AS count, s.label AS section_label,
-               s.id AS section_id, w.id AS workbook_id, w.title AS workbook_title
+               s.id AS section_id, w.id AS workbook_id, w.title AS workbook_title,
+               ak.answer_display AS expected,
+               (SELECT aa2.given
+                  FROM attempt_answers aa2
+                  JOIN attempts a2 ON a2.id = aa2.attempt_id
+                  JOIN sessions sess2 ON sess2.id = a2.session_id
+                 WHERE a2.section_id = s.id AND aa2.number = aa.number
+                       AND a2.is_first_submission = 1 AND sess2.status = 'finished'
+                       AND aa2.status != 'correct'
+                 ORDER BY a2.id DESC LIMIT 1) AS given
         FROM attempt_answers aa
         JOIN attempts a ON a.id = aa.attempt_id
         JOIN sessions sess ON sess.id = a.session_id
         JOIN sections s ON s.id = a.section_id
         JOIN workbooks w ON w.id = s.workbook_id
+        JOIN answer_keys ak ON ak.section_id = s.id AND ak.number = aa.number
         WHERE w.id = ? AND w.user_id = ? AND aa.status != 'correct'
               AND a.is_first_submission = 1 AND sess.status = 'finished'
         GROUP BY s.id, aa.number

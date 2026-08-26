@@ -209,8 +209,14 @@ OpenSession   { "session_id": 4, "section_id": 3, "started_at": "...",
   lands on.)
 
 ### Stats & Utility
-- `GET /api/workbooks/{wid}/stats` → `{ "sections": [ { "section_id":3, "label":"Day 01", "session_count":2, "latest_percent":90.0, "best_percent":95.0 } ], "top_missed": [ { "number": 7, "count": 3, "section_label": "Day 02", "section_id": 4, "workbook_id": 1, "workbook_title": "..." } ] }`
+- `GET /api/workbooks/{wid}/stats` → `{ "sections": [ { "section_id":3, "label":"Day 01", "session_count":2, "latest_percent":90.0, "best_percent":95.0 } ], "top_missed": [ { "number": 7, "count": 3, "section_label": "Day 02", "section_id": 4, "workbook_id": 1, "workbook_title": "...", "expected": "3", "given": "9" } ] }`
   (`top_missed` is scoped to `{wid}` only — misses from the caller's other workbooks
   never leak in. Counts a miss from the *first* submission of every *finished*
   session only — an in-progress session and any retry's own misses are excluded,
-  matching `session_count`/`latest_percent`/`best_percent`.)
+  matching `session_count`/`latest_percent`/`best_percent`. `expected` is the
+  section's current answer-key display for that number (`answer_keys.answer_display`,
+  not a possibly-stale value frozen on an old attempt); `given` is what the student
+  actually answered on the most recent *qualifying* miss — i.e. among first
+  submissions of finished sessions that got this number wrong, the one with the
+  highest attempt id — `""` meaning that submission left it blank. Both are what
+  the click-through detail modal renders as "내 답 {given} → 정답 {expected}".)

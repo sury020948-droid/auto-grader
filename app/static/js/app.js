@@ -1179,19 +1179,41 @@
           </div>
         </div>
 
-        <div class="stack-two-col stack">
-          <section class="card stats-card" aria-label="통계">
-            <h2>${ic('target', 15)} 자주 틀린 문제</h2>
-            ${missedHtml}
-          </section>
-          <section class="card sections-card" aria-label="섹션 목록" style="margin-bottom:0;">
-            <h2>${ic('list', 15)} 섹션 ${sections.length}개</h2>
+        <div class="card" id="wb-tabs-card">
+          <div class="tabs" role="tablist" aria-label="워크북 보기">
+            <button class="tab" role="tab" id="tab-sections" aria-controls="panel-sections" aria-selected="true">
+              ${ic('list', 15)} 섹션 ${sections.length}개
+            </button>
+            <button class="tab" role="tab" id="tab-missed" aria-controls="panel-missed" aria-selected="false">
+              ${ic('target', 15)} 자주 틀린 문제
+            </button>
+          </div>
+
+          <div class="tabpanel" id="panel-sections" role="tabpanel" aria-labelledby="tab-sections">
             ${sections.length
-              ? `<div class="sections-grid" style="margin-top:4px;">${sectionCards}</div>`
+              ? `<div class="sections-grid">${sectionCards}</div>`
               : sectionEmpty}
-          </section>
+          </div>
+
+          <div class="tabpanel" id="panel-missed" role="tabpanel" aria-labelledby="tab-missed" hidden>
+            ${missedHtml}
+          </div>
         </div>
       </section>`;
+
+    const tabSections = $('#tab-sections');
+    const tabMissed = $('#tab-missed');
+    const panelSections = $('#panel-sections');
+    const panelMissed = $('#panel-missed');
+    function selectWbTab(which) {
+      const sectionsOn = which === 'sections';
+      tabSections.setAttribute('aria-selected', String(sectionsOn));
+      tabMissed.setAttribute('aria-selected', String(!sectionsOn));
+      panelSections.hidden = !sectionsOn;
+      panelMissed.hidden = sectionsOn;
+    }
+    tabSections.addEventListener('click', () => selectWbTab('sections'));
+    tabMissed.addEventListener('click', () => selectWbTab('missed'));
 
     $('#btn-del-wb').addEventListener('click', async (e) => {
       const btn = e.currentTarget;
@@ -1294,8 +1316,11 @@
     focusTitle();
   }
 
-  /* "자주 틀린 문제" 항목 클릭 시 소속 워크북/섹션을 보여주는 상세 모달. */
+  /* "자주 틀린 문제" 항목 클릭 시 소속 워크북/섹션과 실제 오답 내용을 보여주는
+     상세 모달 -- given/expected는 이 문제가 (마지막으로) 틀렸던 가장 최근
+     채점의 스냅샷이다. given이 빈 값이면 미응답이었다는 뜻. */
   function openMissedDetailModal(m) {
+    const unanswered = !m.given;
     $('#missed-detail-body').innerHTML = `
       <p class="missed-detail-headline">
         <span class="missed-num">${Number(m.number)}번</span>
@@ -1304,7 +1329,14 @@
       <dl class="missed-detail-meta">
         <div><dt>워크북</dt><dd>${esc(m.workbook_title || '')}</dd></div>
         <div><dt>섹션</dt><dd>${esc(m.section_label || '')}</dd></div>
-      </dl>`;
+      </dl>
+      <div class="wrong-card ${unanswered ? 'unanswered' : ''}" style="margin-top:14px;">
+        <span class="wc-num">${Number(m.number)}</span>
+        <span class="wc-body">
+          <span class="wc-line">내 답 <b>${unanswered ? '(미응답)' : esc(m.given)}</b> → 정답 <b>${esc(m.expected)}</b></span>
+        </span>
+        <span class="wc-status">${unanswered ? esc(STATUS_NAMES.unanswered) : esc(STATUS_NAMES.incorrect)}</span>
+      </div>`;
     $('#missed-detail-wb-link').href = `#/wb/${Number(m.workbook_id)}`;
     $('#missed-detail-solve-link').href = `#/sec/${Number(m.section_id)}/solve`;
     $('#dlg-missed-detail').showModal();

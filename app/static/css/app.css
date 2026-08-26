@@ -357,7 +357,7 @@ button.chip:hover { filter: brightness(.96); box-shadow: 0 0 0 3px rgba(15, 23, 
 .empty-actions { margin-top: 22px; }
 
 /* --------------------------------------------------------------------------
-   Tabs (Extract)
+   Tabs (Extract photo/paste; Workbook detail 섹션/자주 틀린 문제)
    -------------------------------------------------------------------------- */
 .tabs {
   display: flex;
@@ -530,14 +530,6 @@ button.chip:hover { filter: brightness(.96); box-shadow: 0 0 0 3px rgba(15, 23, 
 .meta-line { color: var(--muted); font-size: 13.5px; }
 .head-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
-.stats-card h2, .sections-card h2 {
-  font-size: 15px;
-  font-weight: 800;
-  margin-bottom: 12px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
 .missed-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
 .missed-item {
   display: flex;
@@ -570,8 +562,6 @@ button.chip:hover { filter: brightness(.96); box-shadow: 0 0 0 3px rgba(15, 23, 
   font-weight: 800;
   font-size: 13px;
 }
-.stack { display: grid; gap: 14px; }
-
 .sections-grid {
   display: grid;
   grid-template-columns: 1fr;
@@ -1093,12 +1083,6 @@ button.chip:hover { filter: brightness(.96); box-shadow: 0 0 0 3px rgba(15, 23, 
   .grid-books { grid-template-columns: repeat(3, 1fr); }
   .sections-grid { grid-template-columns: repeat(3, 1fr); }
   .breakdown-grid { grid-template-columns: repeat(3, 1fr); }
-  .stack-two-col {
-    display: grid;
-    grid-template-columns: 5fr 7fr;
-    align-items: start;
-    gap: 14px;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {
