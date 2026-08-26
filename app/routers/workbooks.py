@@ -6,7 +6,7 @@ from .. import db as dal
 from ..db import get_conn
 from ..deps import get_current_user
 from ..errors import AppError
-from ..schemas import WorkbookCreate
+from ..schemas import WorkbookCreate, WorkbookUpdate
 
 router = APIRouter(tags=["workbooks"])
 
@@ -48,6 +48,23 @@ def read_workbook(
     if not wb:
         raise HTTPException(status_code=404, detail="워크북을 찾을 수 없습니다.")
     wb["sections"] = dal.list_sections(conn, wid, int(user["id"]))
+    return wb
+
+
+@router.patch("/workbooks/{wid}")
+def rename_workbook(
+    wid: ID,
+    payload: WorkbookUpdate,
+    user: dict = Depends(get_current_user),
+    conn=Depends(get_conn),
+):
+    title = payload.title.strip()
+    if not title:
+        raise AppError(400, "제목을 입력해 주세요.")
+    uid = int(user["id"])
+    wb = _require_workbook(conn, wid, uid)
+    dal.update_workbook_title(conn, wid, uid, title)
+    wb["title"] = title
     return wb
 
 

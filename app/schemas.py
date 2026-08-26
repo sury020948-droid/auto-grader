@@ -9,6 +9,10 @@ class WorkbookCreate(BaseModel):
     title: str = Field(min_length=1, max_length=120)
 
 
+class WorkbookUpdate(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+
+
 class ExtractTextPayload(BaseModel):
     raw_text: str = Field(min_length=1, max_length=200_000)
 

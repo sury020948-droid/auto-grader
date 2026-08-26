@@ -40,6 +40,13 @@ class TestDeviceHeaderRequired:
     def test_valid_uuid_accepted(self, client):
         assert client.post("/api/workbooks", json={"title": "t"}).status_code == 201
 
+    def test_patch_rename_without_header_401(self, raw_client):
+        """The rename route wires the same get_current_user dependency as
+        every other /workbooks route -- confirm it isn't exempt."""
+        r = raw_client.patch("/api/workbooks/1", json={"title": "이름 변경 시도"})
+        assert r.status_code == 401
+        assert DEVICE_HEADER in r.json()["detail"]
+
 
 class TestDeviceIdentity:
     def test_same_device_across_restarts_sees_same_data(

@@ -87,6 +87,7 @@ AttemptResult { "id": 7, "section_id": 3, "taken_at": "...",
 - `GET /api/workbooks` → `Workbook[]` (ordered by created_at desc)
 - `POST /api/workbooks` body `{ "title": "쎈 미적분" }` → `201 Workbook` (400 if title blank)
 - `GET /api/workbooks/{wid}` → `{ ...Workbook fields, "sections": Section[] }` (404 if missing)
+- `PATCH /api/workbooks/{wid}` body `{ "title": "..." }` → `200 Workbook` (400 blank after trim, 404 missing/not owned, 422 validation)
 - `DELETE /api/workbooks/{wid}` → `204` (cascades sections/keys/attempts)
 
 ### Extraction

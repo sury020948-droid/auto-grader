@@ -308,12 +308,13 @@ button.chip:hover { filter: brightness(.96); box-shadow: 0 0 0 3px rgba(15, 23, 
 .book-title {
   font-size: 17px;
   font-weight: 800;
-  padding-right: 34px;
+  padding-right: 68px;
   word-break: keep-all;
 }
 .book-meta { margin-top: 6px; font-size: 13.5px; color: var(--muted); }
 .book-foot { margin-top: 14px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .book-del { position: absolute; top: 10px; right: 10px; }
+.book-edit { position: absolute; top: 10px; right: 44px; }
 
 .empty-state {
   text-align: center;

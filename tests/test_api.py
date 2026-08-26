@@ -102,6 +102,153 @@ class TestWorkbookCrud:
         assert client.delete(f"/api/workbooks/{wb}").status_code == 204
         assert client.get(f"/api/workbooks/{wb}").status_code == 404
 
+    def test_rename_updates_title(self, client, wb):
+        r = client.patch(f"/api/workbooks/{wb}", json={"title": "새 이름"})
+        assert r.status_code == 200
+        assert r.json()["title"] == "새 이름"
+        assert client.get(f"/api/workbooks/{wb}").json()["title"] == "새 이름"
+        items = client.get("/api/workbooks").json()
+        assert next(b for b in items if b["id"] == wb)["title"] == "새 이름"
+
+    def test_rename_blank_title_rejected(self, client, wb):
+        assert client.patch(f"/api/workbooks/{wb}", json={"title": "   "}).status_code == 400
+
+    def test_rename_missing_workbook_404(self, client):
+        assert client.patch("/api/workbooks/999", json={"title": "새 이름"}).status_code == 404
+
+    def test_cross_device_rename_blocked(self, client, other_device_client, wb):
+        r = other_device_client.patch(f"/api/workbooks/{wb}", json={"title": "가로채기"})
+        assert r.status_code == 404
+        assert client.get(f"/api/workbooks/{wb}").json()["title"] == "테스트 문제집"
+
+    def test_rename_trims_surrounding_whitespace(self, client, wb):
+        r = client.patch(f"/api/workbooks/{wb}", json={"title": "  트림 테스트  "})
+        assert r.status_code == 200
+        assert r.json()["title"] == "트림 테스트"
+        assert client.get(f"/api/workbooks/{wb}").json()["title"] == "트림 테스트"
+
+    def test_rename_empty_string_title_422(self, client, wb):
+        """A literal "" fails pydantic's min_length=1 (422) -- distinct from
+        the whitespace-only case, which passes schema validation and is only
+        caught by the route's own post-strip blank check (400)."""
+        r = client.patch(f"/api/workbooks/{wb}", json={"title": ""})
+        assert r.status_code == 422
+        assert client.get(f"/api/workbooks/{wb}").json()["title"] == "테스트 문제집"
+
+    def test_rename_missing_title_field_422(self, client, wb):
+        assert client.patch(f"/api/workbooks/{wb}", json={}).status_code == 422
+
+    def test_rename_title_too_long_422(self, client, wb):
+        r = client.patch(f"/api/workbooks/{wb}", json={"title": "x" * 121})
+        assert r.status_code == 422
+        assert client.get(f"/api/workbooks/{wb}").json()["title"] == "테스트 문제집"
+
+    def test_rename_title_at_max_length_accepted(self, client, wb):
+        title = "x" * 120
+        r = client.patch(f"/api/workbooks/{wb}", json={"title": title})
+        assert r.status_code == 200
+        assert r.json()["title"] == title
+
+    def test_rename_invalid_wid_path_422(self, client):
+        """`wid` reuses the shared `ID` path type (ge=1) on PATCH too."""
+        assert client.patch("/api/workbooks/0", json={"title": "x"}).status_code == 422
+
+    def test_rename_response_matches_list_item_shape(self, client, wb):
+        list_item = next(b for b in client.get("/api/workbooks").json() if b["id"] == wb)
+        patch_body = client.patch(
+            f"/api/workbooks/{wb}", json={"title": "모양 테스트"}
+        ).json()
+        assert set(patch_body) == set(list_item)
+
+    def test_rename_does_not_change_id_or_created_at(self, client, wb):
+        before = client.get(f"/api/workbooks/{wb}").json()
+        after = client.patch(f"/api/workbooks/{wb}", json={"title": "정체성 유지"}).json()
+        assert after["id"] == before["id"] == wb
+        assert after["created_at"] == before["created_at"]
+
+    def test_rename_to_current_title_is_a_no_op_success(self, client, wb):
+        r = client.patch(f"/api/workbooks/{wb}", json={"title": "테스트 문제집"})
+        assert r.status_code == 200
+        assert r.json()["title"] == "테스트 문제집"
+
+    def test_successive_renames_persist_latest_title(self, client, wb):
+        client.patch(f"/api/workbooks/{wb}", json={"title": "첫번째"})
+        client.patch(f"/api/workbooks/{wb}", json={"title": "두번째"})
+        r = client.patch(f"/api/workbooks/{wb}", json={"title": "세번째"})
+        assert r.status_code == 200
+        assert client.get(f"/api/workbooks/{wb}").json()["title"] == "세번째"
+
+    def test_rename_does_not_affect_other_workbooks(self, client, wb):
+        other_id = client.post("/api/workbooks", json={"title": "다른 워크북"}).json()["id"]
+        client.patch(f"/api/workbooks/{wb}", json={"title": "이것만 변경"})
+        assert client.get(f"/api/workbooks/{other_id}").json()["title"] == "다른 워크북"
+
+    def test_rename_preserves_sections_and_counts(self, client, wb):
+        _import_headers(client, wb)
+        before = client.get(f"/api/workbooks/{wb}").json()
+        assert before["section_count"] > 0
+        assert before["problem_count"] > 0
+        before_section_ids = [s["id"] for s in before["sections"]]
+
+        r = client.patch(f"/api/workbooks/{wb}", json={"title": "이름 변경됨"})
+        assert r.status_code == 200
+        assert r.json()["section_count"] == before["section_count"]
+        assert r.json()["problem_count"] == before["problem_count"]
+
+        after = client.get(f"/api/workbooks/{wb}").json()
+        assert after["title"] == "이름 변경됨"
+        assert after["section_count"] == before["section_count"]
+        assert after["problem_count"] == before["problem_count"]
+        assert [s["id"] for s in after["sections"]] == before_section_ids
+
+
+class TestUpdateWorkbookTitleDal:
+    """`rename_workbook` never inspects `update_workbook_title`'s return
+    value -- pin its True/False contract directly at the dal layer so a
+    silent regression there (e.g. dropping the `user_id` scope from the
+    WHERE clause) is still caught even though the route itself can't."""
+
+    def test_false_for_nonexistent_workbook(self, client, device_id):
+        from app import db as dal
+
+        conn = dal.connect()
+        try:
+            user = dal.get_or_create_device_user(conn, device_id)
+            ok = dal.update_workbook_title(conn, 999999, int(user["id"]), "x")
+        finally:
+            conn.close()
+        assert ok is False
+
+    def test_false_for_foreign_owner_and_leaves_title_untouched(
+        self, client, wb, device_id
+    ):
+        import uuid
+
+        from app import db as dal
+
+        conn = dal.connect()
+        try:
+            other = dal.get_or_create_device_user(conn, str(uuid.uuid4()))
+            ok = dal.update_workbook_title(conn, wb, int(other["id"]), "가로채기")
+            conn.commit()
+        finally:
+            conn.close()
+        assert ok is False
+        assert client.get(f"/api/workbooks/{wb}").json()["title"] == "테스트 문제집"
+
+    def test_true_and_persists_for_real_owner(self, client, wb, device_id):
+        from app import db as dal
+
+        conn = dal.connect()
+        try:
+            user = dal.get_or_create_device_user(conn, device_id)
+            ok = dal.update_workbook_title(conn, wb, int(user["id"]), "DAL 직접 변경")
+            conn.commit()
+        finally:
+            conn.close()
+        assert ok is True
+        assert client.get(f"/api/workbooks/{wb}").json()["title"] == "DAL 직접 변경"
+
 
 class TestExtraction:
     def test_paste_day_preview(self, client):

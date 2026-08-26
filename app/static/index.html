@@ -45,6 +45,21 @@
   </form>
 </dialog>
 
+<dialog id="dlg-rename" class="dialog" aria-labelledby="dlg-rename-title">
+  <form id="form-rename" novalidate>
+    <h2 id="dlg-rename-title">이름 바꾸기</h2>
+    <div class="field">
+      <label for="inp-rename-title">워크북 제목</label>
+      <input class="input" id="inp-rename-title" name="title" type="text"
+             maxlength="60" placeholder="예) 쎈 미적분 3-2" autocomplete="off" required>
+    </div>
+    <div class="dialog-actions">
+      <button type="button" class="btn btn-ghost" data-close-dialog>취소</button>
+      <button type="submit" class="btn" id="btn-rename-submit">저장</button>
+    </div>
+  </form>
+</dialog>
+
 <dialog id="dlg-apikey" class="dialog dialog-wide" aria-labelledby="dlg-apikey-title">
   <form id="form-apikey" novalidate>
     <h2 id="dlg-apikey-title">Gemini API 키 설정</h2>

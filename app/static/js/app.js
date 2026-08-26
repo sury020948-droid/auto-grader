@@ -21,6 +21,7 @@
   const ICONS = {
     plus: '<path d="M12 5v14M5 12h14"/>',
     trash: '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/><path d="M10 11v6M14 11v6"/>',
+    edit: '<path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>',
     chevron: '<path d="M6 9l6 6 6-6"/>',
     check: '<path d="M20 6L9 17l-5-5"/>',
     alert: '<path d="M12 3l10 18H2z"/><path d="M12 10v4"/><path d="M12 17.5h.01"/>',
@@ -312,6 +313,10 @@
             <span class="badge ${pctBadgeClass(b.latest_percent)}">${esc(pctText(b.latest_percent, '기록 없음'))}</span>
           </div>
         </a>
+        <button class="icon-btn book-edit" data-rename-wb="${Number(b.id)}"
+                data-title="${esc(b.title)}" aria-label="${esc(b.title)} 이름 바꾸기">
+          ${ic('edit')}
+        </button>
         <button class="icon-btn danger book-del" data-del-wb="${Number(b.id)}"
                 data-title="${esc(b.title)}" aria-label="${esc(b.title)} 삭제">
           ${ic('trash')}
@@ -370,6 +375,16 @@
       });
     });
 
+    view.querySelectorAll('[data-rename-wb]').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const id = btn.getAttribute('data-rename-wb');
+        const title = btn.getAttribute('data-title') || '';
+        openRenameDialog(id, title);
+      });
+    });
+
     focusTitle();
   }
 
@@ -378,6 +393,22 @@
     const form = $('#form-create');
     const inp = $('#inp-create-title');
     form.reset();
+    dlg.showModal();
+    inp.focus();
+  }
+
+  /* Shared rename dialog — opened from the library grid and the workbook
+     detail header alike; the submit handler (below, with the other static
+     dialog wiring) reads `renameTargetId` to know which workbook to PATCH. */
+  let renameTargetId = null;
+
+  function openRenameDialog(id, currentTitle) {
+    const dlg = $('#dlg-rename');
+    const form = $('#form-rename');
+    const inp = $('#inp-rename-title');
+    form.reset();
+    inp.value = currentTitle || '';
+    renameTargetId = id;
     dlg.showModal();
     inp.focus();
   }
@@ -1126,6 +1157,7 @@
           </div>
           <div class="head-actions">
             <a class="btn btn-secondary" href="#/wb/${id}/extract-more">${ic('plus')} 정답 추가 등록</a>
+            <button class="btn btn-secondary" id="btn-rename-wb">${ic('edit')} 이름 바꾸기</button>
             <button class="btn btn-danger" id="btn-del-wb">${ic('trash')} 삭제</button>
           </div>
         </div>
@@ -1157,6 +1189,8 @@
         toast(err.message, 'error');
       }
     });
+
+    $('#btn-rename-wb').addEventListener('click', () => openRenameDialog(id, wb.title));
 
     /* --- per-session delete: removes only that section + its records --- */
     view.querySelectorAll('[data-del-sec]').forEach((btn) => {
@@ -1637,6 +1671,30 @@
       dlg.close();
       toast(`'${wb.title}' 워크북이 생성되었습니다. 정답을 등록해 주세요.`, 'success');
       location.hash = `#/new/${wb.id}`;
+    } catch (err) {
+      toast(err.message, 'error');
+    } finally {
+      setPending(btn, false);
+    }
+  });
+
+  $('#form-rename').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const dlg = $('#dlg-rename');
+    const inp = $('#inp-rename-title');
+    const btn = $('#btn-rename-submit');
+    const title = inp.value.trim();
+    if (!title) {
+      toast('워크북 제목을 입력해 주세요.', 'error');
+      inp.focus();
+      return;
+    }
+    setPending(btn, true, '저장 중…');
+    try {
+      await api(`/workbooks/${renameTargetId}`, { method: 'PATCH', body: { title } });
+      dlg.close();
+      toast('워크북 이름이 변경되었습니다.', 'success');
+      render();
     } catch (err) {
       toast(err.message, 'error');
     } finally {

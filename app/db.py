@@ -295,6 +295,16 @@ def delete_workbook(conn: sqlite3.Connection, wid: int, uid: int) -> bool:
     return cur.rowcount > 0
 
 
+def update_workbook_title(
+    conn: sqlite3.Connection, wid: int, uid: int, title: str
+) -> bool:
+    cur = conn.execute(
+        "UPDATE workbooks SET title = ? WHERE id = ? AND user_id = ?",
+        (title, wid, uid),
+    )
+    return cur.rowcount > 0
+
+
 # ------------------------------------------------------------- sections ----
 
 def list_sections(
