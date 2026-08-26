@@ -9,7 +9,7 @@ from .config import STATIC_DIR, upload_dir
 from .db import get_conn, init_db
 from .deps import try_current_user
 from .errors import AppError
-from .routers import attempts, extraction, settings, workbooks
+from .routers import attempts, extraction, sessions, settings, workbooks
 from .services import gemini
 
 
@@ -30,6 +30,7 @@ def create_app() -> FastAPI:
     app.include_router(workbooks.router, prefix="/api")
     app.include_router(extraction.router, prefix="/api")
     app.include_router(attempts.router, prefix="/api")
+    app.include_router(sessions.router, prefix="/api")
     app.include_router(settings.router, prefix="/api")
 
     @app.get("/api/health")

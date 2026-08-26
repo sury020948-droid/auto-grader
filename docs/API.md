@@ -1,4 +1,4 @@
-# REST API Contract v2.0
+# REST API Contract v3.0
 
 Base URL: `http://<host>:8000` · All bodies JSON unless noted. Errors: `{ "detail": string }` with proper HTTP codes.
 
@@ -33,7 +33,8 @@ validity (`401` with a clear message when Google rejects the key).
 Workbook      { "id": 1, "title": "쎈 미적분", "created_at": "...", "section_count": 12, "problem_count": 240, "latest_percent": 85.0 }
 
 Section       { "id": 3, "workbook_id": 1, "label": "Day 01", "position": 0,
-                "problem_count": 20, "attempt_count": 2, "latest_percent": 90.0, "best_percent": 95.0 }
+                "problem_count": 20, "session_count": 2, "latest_percent": 90.0, "best_percent": 95.0,
+                "open_session_id": null }   // non-null while a session is mid-retry -- see Sessions below
 
 ExtractionEntry   { "number": 1, "qtype": "multiple_choice", "answer_display": "(3)", "answer": "3", "line": 0 }
                   // qtype ∈ "multiple_choice" | "numeric" (only these two types are supported)
@@ -58,13 +59,38 @@ ExtractionPreview { "engine": "gemini-vision",     // or "paste" when raw_text g
                     "issues": ExtractionIssue[],
                     "recommendation": Recommendation }
 
-AttemptResult { "id": 7, "section_id": 3, "taken_at": "...",
-                "total": 20, "score": 18, "percent": 90.0,
-                "is_full_attempt": true,  // false for a merge/retry attempt — see below
+AttemptResult { "id": 7, "section_id": 3, "session_id": 4,
+                "is_first_submission": true, "submission_seq": 1, "session_finished": false,
+                "taken_at": "...", "total": 20, "score": 18, "percent": 90.0,
                 "results": [ { "number": 1, "qtype": "numeric", "expected": "3", "given": "3", "status": "correct" },   // correct|incorrect|unanswered
                              { "number": 2, "qtype": "multiple_choice", "expected": "1,4", "given": "4,1", "status": "correct" } ],
                 "wrong_numbers": [5], "unanswered_numbers": [],
                 "note"?: "..." }   // present when extra/unanswered inputs were excluded (see below)
+
+Session       { "session_id": 4, "section_id": 3, "status": "finished",   // "in_progress" | "finished"
+                "started_at": "...", "finished_at": "...",
+                "first_score": 18, "first_total": 20, "first_percent": 90.0 }
+                // first_* are frozen from the session's FIRST submission and never recomputed,
+                // even after a later retry improves on it — every history/aggregate surface
+                // (section latest/best %, workbook latest %, the history list) reads these.
+
+SessionDetail { // ...every Session field, plus:
+                "submission_count": 3,
+                "first_results": [ /* AttemptResult["results"] of the first submission */ ],
+                "breakdown": { "total_questions": 20,
+                               "first_try":  { "numbers": [1,2,"..."], "count": 15, "percent": 75.0 },
+                               "second_try": { "numbers": [7,9],       "count": 2,  "percent": 10.0 },
+                               "third_plus": { "numbers": [3,12,17],   "count": 3,  "percent": 15.0 } } }
+                // breakdown groups every number in the section's full answer key by the
+                // submission_seq at which it was FIRST answered correctly across the whole
+                // session; third_plus also holds any number never answered correctly at all.
+
+OpenSession   { "session_id": 4, "section_id": 3, "started_at": "...",
+                "submission_count": 2, "latest_attempt": AttemptResult }
+                // the section's current in-progress session, if any. The quiz screen's one
+                // source of both "which numbers still need retrying" (latest_attempt.results
+                // entries where status != "correct") and "what was answered last time"
+                // (their given) — no client-side retry bookkeeping needed.
 ```
 
 ## Endpoints
@@ -137,31 +163,50 @@ AttemptResult { "id": 7, "section_id": 3, "taken_at": "...",
 ### Sections & Attempts
 - `GET /api/sections/{sid}` → `{ "id": 3, "label": "Day 01", "workbook_id": 1, "workbook_title": "...", "numbers": [1,...,20] }`
   (**never includes answers** — integrity requirement)
-- `DELETE /api/sections/{sid}` → `204`. Deletes that session only; its answer keys and
-  attempts cascade, sibling sections/workbook stay untouched (404 if missing)
+- `DELETE /api/sections/{sid}` → `204`. Deletes that section only; its answer keys,
+  sessions and attempts cascade, sibling sections/workbook stay untouched (404 if missing)
 - `POST /api/attempts` body `{ "section_id": 3, "answers": { "1": "3", "2": "" },
-  "merge_attempt_id"?: 7, "answered_only"?: false }` → `201 AttemptResult`
+  "answered_only"?: false }` → `201 AttemptResult`
   (404 unknown section; empty answers allowed → all unanswered.
-  With `merge_attempt_id`, the base attempt's given answers are overlaid by the new
-  ones so previously solved questions keep their correct status — retry flow.
-  Response gains `"merged_from": 7` when used; base attempt history is untouched.
-  A `merge_attempt_id` retry is saved with `is_full_attempt: false` — it remains
-  fully fetchable via `GET /attempts/{aid}`, but is excluded from
-  `GET /sections/{sid}/attempts`, `attempt_count`, `latest_percent`, `best_percent`,
-  and `top_missed`, so retrying wrong questions only never counts as a new official
-  attempt or moves best/recent stats. Ordinary attempts (no `merge_attempt_id`) are
-  always `is_full_attempt: true`.
+  Auto-detects a retry — no client-supplied id needed: if the section already has an
+  open session (`GET /sections/{sid}/session` would 200), the given answers are
+  overlaid onto that session's own latest submission (previously solved questions
+  keep their given answer — and thus their `correct`/`incorrect` status — unless
+  explicitly re-answered; an explicit blank retracts a previously given answer), the
+  full merged set is regraded, and it's stored as the next `submission_seq` in the
+  *same* session. If no session is open, this call opens a new one and freezes this
+  grading result onto it as `first_score`/`first_total`/`first_percent` — permanently;
+  later retries within that session never change those fields or move
+  `latest_percent`/`best_percent`/the history list until the session is finished, and
+  even then it's still this frozen first-submission score that lands there, not the
+  retry's.
   With `answered_only: true` (default `false`), blank/skipped questions are excluded
   from `total` and `percent` instead of counting against the score — `results` still
   lists them with `status: "unanswered"` and they still appear in `unanswered_numbers`,
   they just no longer shrink the percentage. `score` is unaffected either way, since
   unanswered questions were never counted as correct.)
-- `GET /api/sections/{sid}/attempts` → `AttemptSummary[]` (`{ id, taken_at, score, total, percent }`, desc)
-- `GET /api/attempts/{aid}` → full `AttemptResult` (review after grading)
+- `GET /api/attempts/{aid}` → full `AttemptResult` (review after grading; 404 if
+  missing/not owned)
 - `DELETE /api/attempts/{aid}` → `204`
 
+### Sessions
+- `GET /api/sections/{sid}/session` → `200 OpenSession` (404 if no session is
+  currently open for this section — including right after it's been finished)
+- `POST /api/sessions/{id}/finish` → `200 Session` ("채점 끝내기". Idempotent —
+  finishing an already-finished session just returns its unchanged summary rather
+  than erroring. 404 if unknown/not owned.)
+- `GET /api/sections/{sid}/sessions` → `Session[]` (finished sessions only, desc by
+  id — one history entry per finished session, replacing the removed
+  `GET /sections/{sid}/attempts`. An in-progress session never appears here.)
+- `GET /api/sessions/{id}` → `200 SessionDetail` (404 unless owned **and**
+  `status == "finished"` — deliberately disjoint from `GET /sections/{sid}/session`:
+  an in-progress session's live state is only ever served there, never here. Reused
+  both for clicking a past history entry and for the screen "채점 끝내기" itself
+  lands on.)
+
 ### Stats & Utility
-- `GET /api/workbooks/{wid}/stats` → `{ "sections": [ { "section_id":3, "label":"Day 01", "attempt_count":2, "latest_percent":90.0, "best_percent":95.0 } ], "top_missed": [ { "number": 7, "count": 3, "section_label": "Day 02", "section_id": 4, "workbook_id": 1, "workbook_title": "..." } ] }`
-  (`top_missed` is scoped to `{wid}` only — misses from the caller's other workbooks never leak in)
-- `POST /api/attempts/from-misses` body `{ "attempt_id": 7 }` → `201 { "section_id": 3, "numbers": [5,9] }`
-  (returns problem list for a retry-only-misses session; graded via normal POST /api/attempts restricted to those numbers)
+- `GET /api/workbooks/{wid}/stats` → `{ "sections": [ { "section_id":3, "label":"Day 01", "session_count":2, "latest_percent":90.0, "best_percent":95.0 } ], "top_missed": [ { "number": 7, "count": 3, "section_label": "Day 02", "section_id": 4, "workbook_id": 1, "workbook_title": "..." } ] }`
+  (`top_missed` is scoped to `{wid}` only — misses from the caller's other workbooks
+  never leak in. Counts a miss from the *first* submission of every *finished*
+  session only — an in-progress session and any retry's own misses are excluded,
+  matching `session_count`/`latest_percent`/`best_percent`.)

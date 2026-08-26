@@ -417,7 +417,9 @@ def list_sections(
                (SELECT sess.first_percent FROM sessions sess WHERE sess.section_id = s.id
                  AND sess.status = 'finished' ORDER BY sess.id DESC LIMIT 1) AS latest_percent,
                (SELECT MAX(sess.first_percent) FROM sessions sess WHERE sess.section_id = s.id
-                 AND sess.status = 'finished') AS best_percent
+                 AND sess.status = 'finished') AS best_percent,
+               (SELECT sess.id FROM sessions sess WHERE sess.section_id = s.id
+                 AND sess.status = 'in_progress' LIMIT 1) AS open_session_id
         FROM sections s
         JOIN workbooks w ON w.id = s.workbook_id
         WHERE s.workbook_id = ? AND w.user_id = ?
@@ -685,11 +687,36 @@ def create_attempt(
     percent: float,
     results: list[dict[str, Any]],
     is_full_attempt: bool = True,
+    session_id: int | None = None,
+    is_first_submission: bool = True,
+    submission_seq: int = 1,
 ) -> int:
+    """Insert one submission event (first or retry).
+
+    session_id/is_first_submission/submission_seq wire this row into the
+    sessions model -- POST /attempts (routers/attempts.py) passes real
+    values on every live request; a caller that omits them gets the same
+    schema defaults a pre-sessions caller always got (session_id NULL,
+    is_first_submission/submission_seq 1). is_full_attempt is SUPERSEDED
+    for reads (see schema_design) but still written here -- callers pass it
+    as a mirror of is_first_submission so a stray direct-SQL reader never
+    sees a misleadingly-stale value.
+    """
     cur = conn.execute(
         "INSERT INTO attempts(user_id, section_id, score, total, percent,"
-        " is_full_attempt) VALUES (?, ?, ?, ?, ?, ?)",
-        (uid, sid, score, total, percent, int(is_full_attempt)),
+        " is_full_attempt, session_id, is_first_submission, submission_seq)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            uid,
+            sid,
+            score,
+            total,
+            percent,
+            int(is_full_attempt),
+            session_id,
+            int(is_first_submission),
+            submission_seq,
+        ),
     )
     aid = int(cur.lastrowid)
     conn.executemany(

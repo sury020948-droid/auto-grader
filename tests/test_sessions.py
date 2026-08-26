@@ -3,6 +3,7 @@
 import pytest
 
 from app.services.conflicts import detect_conflicts, labels_related, normalize_label
+from app.services.sessions import compute_breakdown, merge_answers
 
 DAY_SAMPLE = (
     "Day 01\n1. 3 2. 4 3. 1 4. 5 5. 2\n"
@@ -57,22 +58,28 @@ class TestRetryMerge:
         assert base["score"] == 3
         assert set(base["wrong_numbers"]) == {2}
         assert set(base["unanswered_numbers"]) == {5}
-        assert base["is_full_attempt"] is True
+        assert base["is_first_submission"] is True
+        assert base["submission_seq"] == 1
 
-        misses = client.post(
-            "/api/attempts/from-misses", json={"attempt_id": base["id"]}
-        )
-        assert misses.status_code == 201
-        mdata = misses.json()
-        assert mdata["attempt_id"] == base["id"]
-        assert sorted(mdata["numbers"]) == [2, 5]
+        # The quiz screen derives which numbers still need retrying from the
+        # open session's latest_attempt (status != correct) -- no separate
+        # from-misses call needed any more.
+        open_sess = client.get(f"/api/sections/{s1}/session").json()
+        assert open_sess["session_id"] == base["session_id"]
+        retry_numbers = [
+            r["number"]
+            for r in open_sess["latest_attempt"]["results"]
+            if r["status"] != "correct"
+        ]
+        assert sorted(retry_numbers) == [2, 5]
 
+        # A second POST to the same still-open section is auto-detected as
+        # a retry -- no merge_attempt_id needed.
         retry = client.post(
             "/api/attempts",
             json={
                 "section_id": s1,
                 "answers": {"2": "④"},  # only the re-attempted question
-                "merge_attempt_id": base["id"],
             },
         )
         assert retry.status_code == 201
@@ -86,46 +93,56 @@ class TestRetryMerge:
         assert by_num[4]["given"] == "5" and by_num[4]["status"] == "correct"
         assert by_num[2]["given"] == "④" and by_num[2]["status"] == "correct"
         assert by_num[5]["status"] == "unanswered"
-        assert merged["merged_from"] == base["id"]
-        assert merged["is_full_attempt"] is False  # partial retry, not official
+        assert merged["is_first_submission"] is False
+        assert merged["submission_seq"] == 2
+        assert merged["session_id"] == base["session_id"]  # same session
 
         old = client.get(f"/api/attempts/{base['id']}").json()
         assert old["score"] == 3  # history untouched
 
     def test_blank_retry_answer_retracts(self, client, two_sections):
         _, s1, _ = two_sections
-        base = client.post(
+        client.post(
             "/api/attempts",
             json={"section_id": s1, "answers": {"1": "3", "2": "9"}},
-        ).json()
+        )
         merged = client.post(
             "/api/attempts",
-            json={
-                "section_id": s1,
-                "answers": {"2": ""},
-                "merge_attempt_id": base["id"],
-            },
+            json={"section_id": s1, "answers": {"2": ""}},
         ).json()
         by_num = {r["number"]: r["status"] for r in merged["results"]}
         assert by_num[1] == "correct"
         assert by_num[2] == "unanswered"
 
-    @pytest.mark.xfail(
-        reason=(
-            "merge_attempt_id / POST /attempts/from-misses are removed "
-            "outright by the api_layer chunk (replaced by automatic "
-            "session-derived retry detection), and the attempt_count "
-            "assertions below now depend on a finished `sessions` row that "
-            "POST /api/attempts doesn't create for a live request yet. "
-            "Expect this test to be replaced, not just un-marked, once "
-            "that chunk lands and removes merge_attempt_id for real."
-        ),
-        strict=False,
-    )
-    def test_retry_excluded_from_history_and_aggregates(self, client, two_sections):
-        """Partial retries (merge_attempt_id set) must be persisted and stay
-        fetchable by id, but must not count as a new official attempt in
-        section/workbook history or best/recent stats."""
+    def test_retry_detection_is_scoped_per_section(self, client, two_sections):
+        """An open session in one section must never be picked up as 'the
+        latest submission to merge onto' by a POST to a different section --
+        each section's retry detection is independent."""
+        _, s1, s2 = two_sections
+        client.post("/api/attempts", json={"section_id": s1, "answers": {"1": "3"}})
+
+        first_s2 = client.post(
+            "/api/attempts", json={"section_id": s2, "answers": {"1": "9"}}
+        ).json()
+        assert first_s2["is_first_submission"] is True
+        assert first_s2["submission_seq"] == 1
+        by_num = {r["number"]: r for r in first_s2["results"]}
+        # If s1's answers had leaked in via a wrongly-shared session, Q1
+        # would come back merged from there instead of this section's own.
+        assert by_num[1]["given"] == "9"
+
+    def test_retry_auto_detected_and_first_submission_score_stays_frozen(
+        self, client, two_sections
+    ):
+        """A second POST /attempts to the same still-open section is
+        auto-detected as a retry (no merge_attempt_id needed): it's saved
+        as submission_seq=2 within the *same* session and regrades the full
+        merged answer set -- but the session's frozen first_score/
+        first_total/first_percent, and everything history/aggregates read
+        from, stay exactly the first submission's, even after the retry
+        improves on it. Supersedes the old is_full_attempt-based "partial
+        retries are excluded from aggregates" mechanism with a different
+        one: aggregates read a frozen score, not a filtered attempt set."""
         wid, s1, _ = two_sections
 
         base = client.post(
@@ -137,76 +154,67 @@ class TestRetryMerge:
         ).json()
         assert base["score"] == 3
         assert base["percent"] == 60.0
-        assert base["is_full_attempt"] is True
-
-        hist_before = client.get(f"/api/sections/{s1}/attempts").json()
-        assert len(hist_before) == 1
-
-        stats_before = client.get(f"/api/workbooks/{wid}/stats").json()
-        sec_before = next(s for s in stats_before["sections"] if s["section_id"] == s1)
-        assert sec_before["attempt_count"] == 1
-        assert sec_before["latest_percent"] == sec_before["best_percent"] == 60.0
+        assert base["is_first_submission"] is True
+        session_id = base["session_id"]
+        assert session_id is not None
 
         # Retry fixes both remaining misses (Q2, Q5) -> a perfect 5/5, 100%.
         retry = client.post(
             "/api/attempts",
-            json={
-                "section_id": s1,
-                "answers": {"2": "4", "5": "2"},
-                "merge_attempt_id": base["id"],
-            },
+            json={"section_id": s1, "answers": {"2": "4", "5": "2"}},
         ).json()
         assert retry["score"] == 5
         assert retry["percent"] == 100.0
-        assert retry["is_full_attempt"] is False
+        assert retry["is_first_submission"] is False
+        assert retry["submission_seq"] == 2
+        assert retry["session_id"] == session_id  # same session, not a new one
 
-        # (a) section attempt-history list is unchanged by the retry.
-        hist_after = client.get(f"/api/sections/{s1}/attempts").json()
-        assert hist_after == hist_before
+        # While the session stays open, it doesn't show up in finished
+        # history or aggregates at all yet -- not even under the frozen
+        # first score.
+        assert client.get(f"/api/sections/{s1}/sessions").json() == []
+        stats_open = client.get(f"/api/workbooks/{wid}/stats").json()
+        sec_open = next(s for s in stats_open["sections"] if s["section_id"] == s1)
+        assert sec_open["session_count"] == 0
+        assert sec_open["latest_percent"] is None
 
-        # (b) section + workbook aggregates are unchanged by the retry, even
-        # though the retry's own percent (100%) beats the base attempt's (60%)
-        # -- best/latest must NOT silently move off the back of a partial retry.
+        finish = client.post(f"/api/sessions/{session_id}/finish")
+        assert finish.status_code == 200
+        assert finish.json()["first_percent"] == 60.0  # frozen at the FIRST submission
+
+        # (a) section session-history list now shows exactly one finished
+        # session, carrying the frozen first-submission score -- not the
+        # retry's 100%.
+        hist_after = client.get(f"/api/sections/{s1}/sessions").json()
+        assert len(hist_after) == 1
+        assert hist_after[0]["first_percent"] == 60.0
+
+        # (b) section + workbook aggregates read the same frozen score, even
+        # though the retry's own percent (100%) beats it -- best/latest
+        # must NOT silently move off the back of a retry within one session.
         stats_after = client.get(f"/api/workbooks/{wid}/stats").json()
         sec_after = next(s for s in stats_after["sections"] if s["section_id"] == s1)
-        assert sec_after == sec_before
-        assert sec_after["attempt_count"] == 1
+        assert sec_after["session_count"] == 1
         assert sec_after["latest_percent"] == sec_after["best_percent"] == 60.0
 
         wb_after = client.get(f"/api/workbooks/{wid}").json()
         assert wb_after["latest_percent"] == 60.0
 
-        # (c) the retry attempt itself stays fully persisted and fetchable by
-        # id -- it's excluded from aggregation, not silently dropped.
+        # (c) the retry submission itself stays fully persisted and
+        # fetchable by id -- it's frozen out of the aggregate, not dropped.
         fetched = client.get(f"/api/attempts/{retry['id']}").json()
         assert fetched["percent"] == 100.0
-        assert fetched["is_full_attempt"] is False
-
-    def test_merge_requires_same_section(self, client, two_sections):
-        _, s1, s2 = two_sections
-        base = client.post(
-            "/api/attempts", json={"section_id": s1, "answers": {"1": "3"}}
-        ).json()
-        r = client.post(
-            "/api/attempts",
-            json={"section_id": s2, "answers": {}, "merge_attempt_id": base["id"]},
-        )
-        assert r.status_code == 400
-
-    def test_merge_unknown_attempt_404(self, client, two_sections):
-        _, s1, _ = two_sections
-        r = client.post(
-            "/api/attempts",
-            json={"section_id": s1, "answers": {}, "merge_attempt_id": 99999},
-        )
-        assert r.status_code == 404
+        assert fetched["is_first_submission"] is False
 
 
 class TestSectionDeletion:
     def test_delete_only_target_session(self, client, two_sections):
         wid, s1, s2 = two_sections
-        client.post("/api/attempts", json={"section_id": s1, "answers": {"1": "3"}})
+        a1 = client.post(
+            "/api/attempts", json={"section_id": s1, "answers": {"1": "3"}}
+        ).json()
         client.post("/api/attempts", json={"section_id": s2, "answers": {"1": "2"}})
+        client.post(f"/api/sessions/{a1['session_id']}/finish")
 
         r = client.delete(f"/api/sections/{s2}")
         assert r.status_code == 204
@@ -218,7 +226,7 @@ class TestSectionDeletion:
         assert client.get(f"/api/sections/{s2}").status_code == 404
         assert client.get(f"/api/sections/{s1}").status_code == 200
 
-        hist = client.get(f"/api/sections/{s1}/attempts").json()
+        hist = client.get(f"/api/sections/{s1}/sessions").json()
         assert len(hist) == 1  # sibling data intact
 
         stats = client.get(f"/api/workbooks/{wid}/stats").json()
@@ -227,6 +235,66 @@ class TestSectionDeletion:
 
     def test_delete_missing_section_404(self, client, two_sections):
         assert client.delete("/api/sections/999999").status_code == 404
+
+
+class TestSessionDetailEndpoint:
+    def test_open_session_404_from_detail_endpoint(self, client, two_sections):
+        """GET /sessions/{id} is deliberately disjoint from GET
+        /sections/{sid}/session -- an in-progress session's own id 404s
+        here even though it exists and is owned by the caller."""
+        _, s1, _ = two_sections
+        att = client.post(
+            "/api/attempts", json={"section_id": s1, "answers": {"1": "3"}}
+        ).json()
+        assert client.get(f"/api/sessions/{att['session_id']}").status_code == 404
+
+    def test_finished_session_detail_has_breakdown_and_first_results(
+        self, client, two_sections
+    ):
+        _, s1, _ = two_sections
+        base = client.post(
+            "/api/attempts",
+            json={
+                "section_id": s1,
+                "answers": {"1": "3", "2": "9", "3": "1", "4": "5"},
+            },
+        ).json()  # Q1/3/4 correct on try 1; Q2 wrong; Q5 unanswered
+        client.post(
+            "/api/attempts", json={"section_id": s1, "answers": {"2": "4"}}
+        )  # Q2 fixed on try 2; Q5 still never answered
+        client.post(f"/api/sessions/{base['session_id']}/finish")
+
+        detail = client.get(f"/api/sessions/{base['session_id']}").json()
+        assert detail["status"] == "finished"
+        assert detail["session_id"] == base["session_id"]
+        assert detail["submission_count"] == 2
+        assert detail["first_percent"] == base["percent"]
+        assert detail["first_results"] == base["results"]
+
+        bd = detail["breakdown"]
+        assert bd["total_questions"] == 5
+        assert sorted(bd["first_try"]["numbers"]) == [1, 3, 4]
+        assert bd["second_try"]["numbers"] == [2]
+        assert bd["third_plus"]["numbers"] == [5]  # never answered correctly at all
+        assert bd["third_plus"]["count"] == 1
+        assert bd["first_try"]["percent"] == 60.0
+
+    def test_history_entry_click_through_matches_detail_endpoint(
+        self, client, two_sections
+    ):
+        """A history list entry (GET .../sessions) and its click-through
+        detail (GET /sessions/{id}) must agree on the session's identity
+        and frozen score."""
+        _, s1, _ = two_sections
+        base = client.post(
+            "/api/attempts", json={"section_id": s1, "answers": {"1": "3"}}
+        ).json()
+        client.post(f"/api/sessions/{base['session_id']}/finish")
+
+        [entry] = client.get(f"/api/sections/{s1}/sessions").json()
+        detail = client.get(f"/api/sessions/{entry['session_id']}").json()
+        assert detail["session_id"] == entry["session_id"]
+        assert detail["first_percent"] == entry["first_percent"]
 
 
 class TestTopMissedWorkbookScoping:
@@ -462,6 +530,93 @@ class TestImportResolutions:
         ]
         r = client.post(f"/api/workbooks/{wid}/sections/import", json=payload)
         assert r.status_code == 404
+
+
+class TestSessionsServiceUnit:
+    """Direct, DB-free coverage of app/services/sessions.py's two pure
+    functions -- mirrors TestConflictsUnit below for services/conflicts.py."""
+
+    def test_merge_answers_preserves_and_overlays(self):
+        latest_results = [
+            {"number": 1, "given": "3", "status": "correct"},
+            {"number": 2, "given": "9", "status": "incorrect"},
+            {"number": 3, "given": "", "status": "unanswered"},
+        ]
+        merged = merge_answers(latest_results, {"2": "4", "3": "1"})
+        assert merged == {"1": "3", "2": "4", "3": "1"}
+
+    def test_merge_answers_blank_retracts_previous_value(self):
+        latest_results = [{"number": 1, "given": "3", "status": "correct"}]
+        assert merge_answers(latest_results, {"1": ""}) == {}
+
+    def test_merge_answers_ignores_blank_in_base_results(self):
+        """A never-answered question in the base has nothing to carry
+        forward -- it simply doesn't appear in the merged dict unless the
+        new payload answers it."""
+        latest_results = [{"number": 1, "given": "", "status": "unanswered"}]
+        assert merge_answers(latest_results, {}) == {}
+
+    def test_compute_breakdown_buckets_by_first_correct_submission_seq(self):
+        all_numbers = [1, 2, 3, 4]
+        attempts = [
+            {
+                "submission_seq": 1,
+                "results": [
+                    {"number": 1, "status": "correct"},
+                    {"number": 2, "status": "incorrect"},
+                    {"number": 3, "status": "unanswered"},
+                    {"number": 4, "status": "incorrect"},
+                ],
+            },
+            {
+                "submission_seq": 2,
+                "results": [
+                    {"number": 2, "status": "correct"},
+                    {"number": 4, "status": "incorrect"},
+                ],
+            },
+        ]
+        out = compute_breakdown(all_numbers, attempts)
+        assert out["total_questions"] == 4
+        assert out["first_try"] == {"numbers": [1], "count": 1, "percent": 25.0}
+        assert out["second_try"] == {"numbers": [2], "count": 1, "percent": 25.0}
+        # Q3 never answered at all, Q4 wrong in both submissions -> both
+        # land in third_plus per spec ("never correct" includes "never
+        # answered").
+        assert out["third_plus"] == {"numbers": [3, 4], "count": 2, "percent": 50.0}
+
+    def test_compute_breakdown_tolerates_unsorted_attempts_input(self):
+        """attempts is re-sorted internally by submission_seq -- passing
+        them out of order must not change the result."""
+        all_numbers = [1]
+        forward = compute_breakdown(
+            all_numbers,
+            [
+                {"submission_seq": 1, "results": [{"number": 1, "status": "incorrect"}]},
+                {"submission_seq": 2, "results": [{"number": 1, "status": "correct"}]},
+            ],
+        )
+        reversed_input = compute_breakdown(
+            all_numbers,
+            [
+                {"submission_seq": 2, "results": [{"number": 1, "status": "correct"}]},
+                {"submission_seq": 1, "results": [{"number": 1, "status": "incorrect"}]},
+            ],
+        )
+        assert forward == reversed_input == {
+            "total_questions": 1,
+            "first_try": {"numbers": [], "count": 0, "percent": 0.0},
+            "second_try": {"numbers": [1], "count": 1, "percent": 100.0},
+            "third_plus": {"numbers": [], "count": 0, "percent": 0.0},
+        }
+
+    def test_compute_breakdown_empty_key_does_not_divide_by_zero(self):
+        assert compute_breakdown([], []) == {
+            "total_questions": 0,
+            "first_try": {"numbers": [], "count": 0, "percent": 0.0},
+            "second_try": {"numbers": [], "count": 0, "percent": 0.0},
+            "third_plus": {"numbers": [], "count": 0, "percent": 0.0},
+        }
 
 
 class TestConflictsUnit:

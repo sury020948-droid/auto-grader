@@ -149,8 +149,9 @@ class TestApiAnsweredOnly:
 
     def test_retry_merge_recomputes_total_from_full_merged_answer_set(self, client, wb):
         """A retry must exclude only questions still unanswered after merging
-        with the base attempt, not just the numbers present in the retry's
-        own payload."""
+        with the session's latest submission, not just the numbers present
+        in the retry's own payload. No merge_attempt_id needed -- the open
+        session created by the first POST is auto-detected."""
         r = _import_headers(client, wb)
         sid = r.json()["sections"][0]["id"]
         base = client.post(
@@ -169,11 +170,12 @@ class TestApiAnsweredOnly:
             json={
                 "section_id": sid,
                 "answers": {"3": "1"},  # fill in one previously-skipped question
-                "merge_attempt_id": base["id"],
                 "answered_only": True,
             },
         ).json()
         # merged answers are now {1: "3", 2: "9", 3: "1"} -> 4 and 5 still unanswered
+        assert retry["is_first_submission"] is False
+        assert retry["submission_seq"] == 2
         assert retry["total"] == 3
         assert retry["score"] == 2  # Q1 and Q3 correct, Q2 wrong
         assert set(retry["unanswered_numbers"]) == {4, 5}

@@ -572,10 +572,17 @@ class TestImportAndGrading:
         assert set(att["wrong_numbers"]) == {2, 4}
         assert set(att["unanswered_numbers"]) == {3, 5}
 
-        misses = client.post("/api/attempts/from-misses", json={"attempt_id": att["id"]})
-        assert misses.status_code == 201
-        mdata = misses.json()
-        assert sorted(mdata["numbers"]) == [2, 3, 4, 5]
+        # The quiz screen asks "is a session open?" instead of calling the
+        # since-removed POST /attempts/from-misses to learn which numbers
+        # to retry -- it derives that from the open session's latest_attempt.
+        open_sess = client.get(f"/api/sections/{sid}/session").json()
+        assert open_sess["session_id"] == att["session_id"]
+        retry_numbers = [
+            r["number"]
+            for r in open_sess["latest_attempt"]["results"]
+            if r["status"] != "correct"
+        ]
+        assert sorted(retry_numbers) == [2, 3, 4, 5]
 
         retry = client.post(
             "/api/attempts",
@@ -585,64 +592,71 @@ class TestImportAndGrading:
             },
         )
         assert retry.status_code == 201
+        assert retry.json()["submission_seq"] == 2
 
         stats = client.get(f"/api/workbooks/{wb}/stats").json()
         assert len(stats["sections"]) == 2
         # top_missed's own content/attribution (workbook scoping, per-section
         # grouping) is covered in dedicated depth by
-        # TestTopMissedWorkbookScoping in tests/test_sessions.py -- currently
-        # xfail there: top_missed() now gates on a *finished* `sessions` row
-        # (this chunk's DAL rewrite), and POST /api/attempts doesn't yet
-        # open/attach one for a live request -- that wiring is the
-        # api_layer chunk's job. Not re-asserted here too to avoid a second
-        # copy of the same known, tracked gap.
+        # TestTopMissedWorkbookScoping in tests/test_sessions.py.
 
-        history = client.get(f"/api/sections/{sid}/attempts").json()
-        assert len(history) == 2
-        assert history[0]["id"] >= history[-1]["id"]
+        # Still an open session -- session history only lists *finished*
+        # sessions, so the retry above doesn't show up as separate history
+        # yet (it's submission 2 of the one still-open session).
+        assert client.get(f"/api/sections/{sid}/sessions").json() == []
+
+        finish = client.post(f"/api/sessions/{att['session_id']}/finish")
+        assert finish.status_code == 200
+
+        history = client.get(f"/api/sections/{sid}/sessions").json()
+        assert len(history) == 1
 
         full = client.get(f"/api/attempts/{att['id']}").json()
         assert len(full["results"]) == 5
 
     def test_ordinary_attempts_are_full_and_update_stats(self, client, wb):
-        """Regression for the partial-retry flag: an ordinary attempt (no
-        merge_attempt_id) must be is_full_attempt: true and must keep
-        updating section/workbook history and best/recent stats exactly as
-        before this feature existed."""
+        """Regression for the auto-retry-detection flow: a second ordinary
+        POST /attempts to a still-open section must be auto-detected as a
+        retry within the *same* session (not a brand-new one), and
+        finishing that session must update section/workbook history and
+        best/recent stats off the session's frozen first-submission score,
+        not the retry's."""
         r = _import_headers(client, wb)
         sid = r.json()["sections"][0]["id"]
 
         a1 = client.post(
             "/api/attempts", json={"section_id": sid, "answers": {"1": "3"}}
         ).json()
-        assert a1["is_full_attempt"] is True
+        assert a1["is_first_submission"] is True
+        assert a1["submission_seq"] == 1
 
         a2 = client.post(
             "/api/attempts",
             json={"section_id": sid, "answers": {"1": "3", "2": "4"}},
         ).json()
-        assert a2["is_full_attempt"] is True
+        assert a2["is_first_submission"] is False
+        assert a2["submission_seq"] == 2
+        assert a2["session_id"] == a1["session_id"]
         assert a2["percent"] > a1["percent"]
 
-        history = client.get(f"/api/sections/{sid}/attempts").json()
-        assert len(history) == 2  # both ordinary attempts counted
+        # Still open -- no finished session yet, so no history/aggregate rows.
+        assert client.get(f"/api/sections/{sid}/sessions").json() == []
 
-        # section/workbook aggregates (attempt_count/latest_percent/
-        # best_percent) are sourced from the `sessions` table as of this
-        # chunk's DAL rewrite, and a *finished* session only exists once
-        # something calls create_session()/finish_session() -- POST
-        # /api/attempts doesn't do that for a live request yet, so these
-        # all read as 0/None until the api_layer chunk wires it in. Not
-        # asserted here: per the session design, two ordinary posts to the
-        # same still-open section with no explicit "채점 끝내기" in between
-        # become submission 1 + a retry of *one* session, not two
-        # separately-counted attempts -- so the old "count == 2, latest ==
-        # best == a2's percent" expectations aren't simply restored once
-        # wiring lands, they need re-deriving by that chunk together with
-        # the rest of its test updates.
+        client.post(f"/api/sessions/{a1['session_id']}/finish")
+
+        history = client.get(f"/api/sections/{sid}/sessions").json()
+        assert len(history) == 1  # one finished session, not two attempts
+
+        # section/workbook aggregates (session_count/latest_percent/
+        # best_percent) read the session's *frozen* first-submission score,
+        # not the retry's higher one.
+        stats = client.get(f"/api/workbooks/{wb}/stats").json()
+        sec = next(s for s in stats["sections"] if s["section_id"] == sid)
+        assert sec["session_count"] == 1
+        assert sec["latest_percent"] == sec["best_percent"] == a1["percent"]
 
         fetched = client.get(f"/api/attempts/{a1['id']}").json()
-        assert fetched["is_full_attempt"] is True
+        assert fetched["is_first_submission"] is True
 
     def test_import_chunks_structure(self, client, wb):
         preview = client.post("/api/extract-text", json={"raw_text": FLAT_SAMPLE}).json()
@@ -726,14 +740,23 @@ class TestImportAndGrading:
         assert att["percent"] == 20.0
         assert "note" not in att
 
-    def test_from_misses_perfect_422(self, client, wb):
+    def test_perfect_first_submission_leaves_nothing_to_retry(self, client, wb):
+        """Supersedes the old POST /attempts/from-misses 422 special-case:
+        that endpoint is gone outright, and a perfect first submission now
+        just means there's nothing left to drive a retry off of once the
+        session is finished -- GET /sections/{sid}/session (the only source
+        of "numbers left to retry") 404s once no session is open."""
         r = _import_headers(client, wb)
         sid = r.json()["sections"][0]["id"]
         perfect = {"1": "3", "2": "4", "3": "1", "4": "5", "5": "2"}
         att = client.post("/api/attempts", json={"section_id": sid, "answers": perfect}).json()
         assert att["score"] == 5
-        r = client.post("/api/attempts/from-misses", json={"attempt_id": att["id"]})
-        assert r.status_code == 422
+        assert att["percent"] == 100.0
+
+        finish = client.post(f"/api/sessions/{att['session_id']}/finish")
+        assert finish.status_code == 200
+
+        assert client.get(f"/api/sections/{sid}/session").status_code == 404
 
     def test_delete_attempt(self, client, wb):
         r = _import_headers(client, wb)
@@ -750,10 +773,6 @@ class TestQaRegressions:
         r = client.post(
             "/api/attempts",
             json={"section_id": 999999999999999999999, "answers": {}},
-        )
-        assert r.status_code == 422
-        r = client.post(
-            "/api/attempts/from-misses", json={"attempt_id": 999999999999999999999}
         )
         assert r.status_code == 422
 

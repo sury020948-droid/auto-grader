@@ -48,7 +48,6 @@ class SectionImport(BaseModel):
 class AttemptCreate(BaseModel):
     section_id: int = Field(ge=1, le=2**63 - 1)
     answers: dict[str, SAFE_STR] = Field(default_factory=dict)
-    merge_attempt_id: int | None = Field(default=None, ge=1, le=2**63 - 1)
     answered_only: bool = Field(default=False)
 
     @model_validator(mode="after")
@@ -56,10 +55,6 @@ class AttemptCreate(BaseModel):
         if len(self.answers) > 500:
             raise ValueError("answers 항목이 너무 많습니다 (최대 500개).")
         return self
-
-
-class FromMissesPayload(BaseModel):
-    attempt_id: int = Field(ge=1, le=2**63 - 1)
 
 
 class ApiKeyPayload(BaseModel):

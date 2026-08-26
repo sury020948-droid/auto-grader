@@ -119,9 +119,9 @@ class TestTenantIsolation:
 
         assert other_device_client.get(f"/api/sections/{sid}").status_code == 404
         assert (
-            other_device_client.get(f"/api/sections/{sid}/attempts").status_code
+            other_device_client.get(f"/api/sections/{sid}/sessions").status_code
             == 404
-        ) or other_device_client.get(f"/api/sections/{sid}/attempts").json() == []
+        ) or other_device_client.get(f"/api/sections/{sid}/sessions").json() == []
         assert (
             other_device_client.get(f"/api/attempts/{att['id']}").status_code == 404
         )
