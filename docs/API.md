@@ -213,10 +213,14 @@ OpenSession   { "session_id": 4, "section_id": 3, "started_at": "...",
   (`top_missed` is scoped to `{wid}` only — misses from the caller's other workbooks
   never leak in. Counts a miss from the *first* submission of every *finished*
   session only — an in-progress session and any retry's own misses are excluded,
-  matching `session_count`/`latest_percent`/`best_percent`. `expected` is the
+  matching `session_count`/`latest_percent`/`best_percent`. A question left
+  unanswered by a first submission that used `answered_only` to skip it is not
+  counted as a miss either, since it was never actually graded — same rule the
+  results screen itself applies to its breakdown/wrong-question list. `expected` is the
   section's current answer-key display for that number (`answer_keys.answer_display`,
   not a possibly-stale value frozen on an old attempt); `given` is what the student
   actually answered on the most recent *qualifying* miss — i.e. among first
-  submissions of finished sessions that got this number wrong, the one with the
-  highest attempt id — `""` meaning that submission left it blank. Both are what
-  the click-through detail modal renders as "내 답 {given} → 정답 {expected}".)
+  submissions of finished sessions that got this number wrong (and were actually
+  graded on it — the `answered_only` exclusion above applies here too), the one
+  with the highest attempt id — `""` meaning that submission left it blank. Both
+  are what the click-through detail modal renders as "내 답 {given} → 정답 {expected}".)

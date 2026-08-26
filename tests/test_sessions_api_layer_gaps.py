@@ -532,3 +532,89 @@ class TestTopMissedWorksOnceSessionIsActuallyFinished:
         top = client.get(f"/api/workbooks/{wb}/stats").json()["top_missed"]
         assert len(top) == 1
         assert top[0]["number"] == 1  # still counted as missed -- frozen to submission 1
+
+
+# ---------------------------------------------------------------------------
+# Bug fix: "unanswered questions leaking into selective-grading results".
+# A number an answered_only first submission left unanswered was never
+# actually graded (excluded from that submission's own `total`, exactly
+# like it's excluded from the results screen's own breakdown/wrong-list in
+# app.js) and must not appear in top_missed either -- covers both db.py's
+# outer WHERE (`count`) and the correlated `given` subquery, which need the
+# identical exclusion or they can disagree about the same row.
+# ---------------------------------------------------------------------------
+
+
+class TestTopMissedExcludesAnsweredOnlySkips:
+    def test_answered_only_skipped_numbers_never_appear_in_top_missed(
+        self, client, section, wb
+    ):
+        """Q1 answered and wrong, Q2 answered and correct, Q3-5 left blank
+        under answered_only -- only Q1 (actually graded, actually wrong)
+        may surface; Q3-5 were never graded and must be absent entirely,
+        not merely uncounted."""
+        att = client.post(
+            "/api/attempts",
+            json={
+                "section_id": section,
+                "answers": {"1": "9", "2": "4"},
+                "answered_only": True,
+            },
+        ).json()
+        assert att["total"] == 2  # narrowed: this submission IS answered_only-affected
+        assert set(att["unanswered_numbers"]) == {3, 4, 5}
+        client.post(f"/api/sessions/{att['session_id']}/finish")
+
+        top = client.get(f"/api/workbooks/{wb}/stats").json()["top_missed"]
+        assert [m["number"] for m in top] == [1]
+
+    def test_answered_only_with_nothing_actually_skipped_is_unaffected(
+        self, client, section, wb
+    ):
+        """answered_only with every question actually answered never
+        narrows `total` at all (grade() only subtracts real skips) -- this
+        must behave exactly as if answered_only had been off."""
+        full_answers = {"1": "9", "2": "4", "3": "1", "4": "5", "5": "2"}
+        att = client.post(
+            "/api/attempts",
+            json={"section_id": section, "answers": full_answers, "answered_only": True},
+        ).json()
+        assert att["total"] == 5  # nothing narrowed -- nothing was left blank
+        client.post(f"/api/sessions/{att['session_id']}/finish")
+
+        top = client.get(f"/api/workbooks/{wb}/stats").json()["top_missed"]
+        assert [m["number"] for m in top] == [1]
+
+    def test_given_ignores_a_later_answered_only_skip_and_keeps_the_real_miss(
+        self, client, section, wb
+    ):
+        """Two finished sessions touch the same number: session A actually
+        answers it wrong (a real miss); a later session B (answered_only)
+        leaves it unanswered entirely -- a higher attempt id, so it would
+        win `given`'s own `ORDER BY a2.id DESC` if its row weren't excluded
+        the same way `count`'s row is. Both clauses need the identical
+        exclusion or `count` (still 1, from session A) and `given` (would
+        wrongly go blank) disagree about the same row."""
+        att_a = client.post(
+            "/api/attempts",
+            json={"section_id": section, "answers": _ALL_BUT_Q1_CORRECT},
+        ).json()  # Q1 wrong ("9"), rest correct
+        client.post(f"/api/sessions/{att_a['session_id']}/finish")
+
+        att_b = client.post(
+            "/api/attempts",
+            json={
+                "section_id": section,
+                "answers": {"2": "4", "3": "1", "4": "5", "5": "2"},  # Q1 left blank
+                "answered_only": True,
+            },
+        ).json()
+        assert att_b["total"] == 4
+        assert att_b["unanswered_numbers"] == [1]
+        client.post(f"/api/sessions/{att_b['session_id']}/finish")
+
+        top = client.get(f"/api/workbooks/{wb}/stats").json()["top_missed"]
+        assert len(top) == 1
+        assert top[0]["number"] == 1
+        assert top[0]["count"] == 1  # only session A's real miss counts
+        assert top[0]["given"] == "9"  # session A's real answer, not session B's blank

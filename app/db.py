@@ -774,6 +774,15 @@ def top_missed(
     number) -- gated (chunk 1) to a miss in the *first* submission of a
     *finished* session only, same as every other aggregate.
 
+    A row left 'unanswered' by a first submission that used answered_only to
+    skip it is not a miss either -- it was excluded from that submission's
+    own `total` rather than actually graded (`attempts.total` narrower than
+    that attempt's full per-question row count, exactly how
+    services/grader.py's grade() records an answered_only exclusion), so it
+    must not inflate `count` here, mirroring how the results screen keeps it
+    out of its own breakdown/wrong-list (app.js). A genuinely wrong
+    ('incorrect') answer is unaffected either way -- it was actually graded.
+
     Each row also carries what the click-through detail modal needs to show
     "what the student got wrong": `expected` is the *current* authoritative
     answer_keys.answer_display for that (section, number) -- not the
@@ -796,7 +805,10 @@ def top_missed(
                   JOIN sessions sess2 ON sess2.id = a2.session_id
                  WHERE a2.section_id = s.id AND aa2.number = aa.number
                        AND a2.is_first_submission = 1 AND sess2.status = 'finished'
-                       AND aa2.status != 'correct'
+                       AND (aa2.status = 'incorrect'
+                            OR (aa2.status = 'unanswered' AND a2.total >=
+                                (SELECT COUNT(*) FROM attempt_answers aa2f
+                                  WHERE aa2f.attempt_id = a2.id)))
                  ORDER BY a2.id DESC LIMIT 1) AS given
         FROM attempt_answers aa
         JOIN attempts a ON a.id = aa.attempt_id
@@ -804,7 +816,11 @@ def top_missed(
         JOIN sections s ON s.id = a.section_id
         JOIN workbooks w ON w.id = s.workbook_id
         JOIN answer_keys ak ON ak.section_id = s.id AND ak.number = aa.number
-        WHERE w.id = ? AND w.user_id = ? AND aa.status != 'correct'
+        WHERE w.id = ? AND w.user_id = ?
+              AND (aa.status = 'incorrect'
+                   OR (aa.status = 'unanswered' AND a.total >=
+                       (SELECT COUNT(*) FROM attempt_answers aaf
+                         WHERE aaf.attempt_id = a.id)))
               AND a.is_first_submission = 1 AND sess.status = 'finished'
         GROUP BY s.id, aa.number
         ORDER BY count DESC, aa.number

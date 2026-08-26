@@ -1585,10 +1585,23 @@
       .catch(() => null);
 
     const results = attempt.results || [];
+    // answered_only can narrow this submission's own `total` below the full
+    // per-question `results` array -- grade() (services/grader.py) always
+    // emits one row per answer-key number, status 'unanswered' for anything
+    // left blank, even for numbers answered_only excluded from total/percent.
+    // `total < results.length` happens if and only if that's what happened
+    // for THIS submission. When it has, every never-graded 'unanswered' row
+    // must stay out of the chips and the wrong-question list below -- it
+    // wasn't graded, so it shouldn't look wrong (or right, or skipped) there.
+    const narrowedByAnsweredOnly = results.length > 0 && Number(attempt.total) < results.length;
+    const displayResults = narrowedByAnsweredOnly
+      ? results.filter((r) => r.status !== 'unanswered')
+      : results;
+
     let nCorrect = 0;
     let nWrong = 0;
     let nSkipped = 0;
-    results.forEach((r) => {
+    displayResults.forEach((r) => {
       if (r.status === 'correct') nCorrect += 1;
       else if (r.status === 'incorrect') nWrong += 1;
       else nSkipped += 1;
@@ -1598,6 +1611,13 @@
       nSkipped = (attempt.unanswered_numbers || []).length;
       nCorrect = attempt.score != null ? attempt.score : attempt.total - nWrong - nSkipped;
     }
+    // The retry button's gate below is deliberately NOT nWrong + nSkipped --
+    // those are the display-only counts above, which hide answered_only-
+    // skipped numbers on purpose. Whether there's still something to retry
+    // instead reads the server's own (always-unfiltered) wrong/unanswered
+    // lists, so a section left with only skipped questions still offers one.
+    const nOpenForRetry = (attempt.wrong_numbers || []).length
+      + (attempt.unanswered_numbers || []).length;
 
     const percent = Number(attempt.percent || 0);
     const R = 84;
@@ -1605,7 +1625,7 @@
     const ringColor = percent >= 80 ? 'var(--green)' : percent >= 50 ? 'var(--amber)' : 'var(--red)';
     const targetOffset = C * (1 - Math.min(Math.max(percent, 0), 100) / 100);
 
-    const wrongItems = results.filter((r) => r.status !== 'correct');
+    const wrongItems = displayResults.filter((r) => r.status !== 'correct');
     const wrongHtml = wrongItems.length
       ? `<ul class="wrong-list">
           ${wrongItems.map((r) => `
@@ -1681,7 +1701,7 @@
           ${wrongHtml}
           <div class="result-actions">
             <button class="btn" id="btn-finish-session">${ic('check')} 채점 끝내기</button>
-            <button class="btn" id="btn-retry-misses" ${(nWrong + nSkipped) === 0 ? 'disabled title="다시 풀 문제가 없습니다"' : ''}>
+            <button class="btn" id="btn-retry-misses" ${nOpenForRetry === 0 ? 'disabled title="다시 풀 문제가 없습니다"' : ''}>
               ${ic('refresh')} 틀린 문제만 다시 풀기
             </button>
             <!-- Leaves the session open server-side on purpose -- "채점 끝내기"
@@ -1773,14 +1793,22 @@
     const secInfo = await api(`/sections/${detail.section_id}`).catch(() => null);
 
     const results = detail.first_results || [];
-    const wrongItems = results.filter((r) => r.status !== 'correct');
+    // Same answered_only narrowing as viewAttempt() above, checked against
+    // the first submission's own frozen total instead of the latest
+    // attempt's -- see the comment there for why `first_total <
+    // results.length` exactly identifies it having happened.
+    const narrowedByAnsweredOnly = results.length > 0 && Number(detail.first_total) < results.length;
+    const displayResults = narrowedByAnsweredOnly
+      ? results.filter((r) => r.status !== 'unanswered')
+      : results;
+    const wrongItems = displayResults.filter((r) => r.status !== 'correct');
     let nCorrect;
     let nWrong;
     let nSkipped;
     if (results.length) {
-      nCorrect = results.filter((r) => r.status === 'correct').length;
-      nWrong = results.filter((r) => r.status === 'incorrect').length;
-      nSkipped = results.length - nCorrect - nWrong;
+      nCorrect = displayResults.filter((r) => r.status === 'correct').length;
+      nWrong = displayResults.filter((r) => r.status === 'incorrect').length;
+      nSkipped = displayResults.length - nCorrect - nWrong;
     } else {
       // Defensive fallback for a session whose first-submission snapshot is
       // unexpectedly missing -- every submission always writes its own
