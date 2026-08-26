@@ -116,7 +116,11 @@ def workbook_stats(
             {
                 "section_id": s["id"],
                 "label": s["label"],
-                "attempt_count": s["attempt_count"],
+                # dal.list_sections() exposes this as session_count (the
+                # sessions-based rewrite); the response's own field name
+                # stays attempt_count here -- renaming this API shape is the
+                # api-layer chunk's job, not this DAL/migration chunk's.
+                "attempt_count": s["session_count"],
                 "latest_percent": s["latest_percent"],
                 "best_percent": s["best_percent"],
             }

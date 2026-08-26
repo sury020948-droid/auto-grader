@@ -34,15 +34,29 @@ CREATE TABLE IF NOT EXISTS answer_keys (
     answer_display TEXT NOT NULL,
     PRIMARY KEY (section_id, number)
 );
+CREATE TABLE IF NOT EXISTS sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    section_id INTEGER NOT NULL REFERENCES sections(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'in_progress',
+    started_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    finished_at TEXT,
+    first_score INTEGER NOT NULL DEFAULT 0,
+    first_total INTEGER NOT NULL DEFAULT 0,
+    first_percent REAL NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS attempts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
     section_id INTEGER NOT NULL REFERENCES sections(id) ON DELETE CASCADE,
+    session_id INTEGER REFERENCES sessions(id) ON DELETE CASCADE,
     taken_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
     score INTEGER NOT NULL DEFAULT 0,
     total INTEGER NOT NULL DEFAULT 0,
     percent REAL NOT NULL DEFAULT 0,
-    is_full_attempt INTEGER NOT NULL DEFAULT 1
+    is_full_attempt INTEGER NOT NULL DEFAULT 1,
+    is_first_submission INTEGER NOT NULL DEFAULT 1,
+    submission_seq INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS attempt_answers (
     attempt_id INTEGER NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
@@ -55,6 +69,10 @@ CREATE TABLE IF NOT EXISTS attempt_answers (
 );
 CREATE INDEX IF NOT EXISTS idx_sections_wb ON sections(workbook_id);
 CREATE INDEX IF NOT EXISTS idx_attempts_sec ON attempts(section_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_section ON sessions(section_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_one_open
+    ON sessions(section_id) WHERE status = 'in_progress';
 """
 
 # Columns added by the multi-tenant migration on pre-existing databases.
@@ -132,6 +150,26 @@ def init_db() -> None:
                 " INTEGER NOT NULL DEFAULT 1"
             )
 
+        # --- migration: pre-existing databases predate the sessions table;
+        #     add the columns that link an attempt to the session it's a
+        #     submission of ---
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(attempts)")]
+        if "session_id" not in cols:
+            conn.execute(
+                "ALTER TABLE attempts ADD COLUMN session_id"
+                " INTEGER REFERENCES sessions(id) ON DELETE CASCADE"
+            )
+        if "is_first_submission" not in cols:
+            conn.execute(
+                "ALTER TABLE attempts ADD COLUMN is_first_submission"
+                " INTEGER NOT NULL DEFAULT 1"
+            )
+        if "submission_seq" not in cols:
+            conn.execute(
+                "ALTER TABLE attempts ADD COLUMN submission_seq"
+                " INTEGER NOT NULL DEFAULT 1"
+            )
+
         # --- ensure one legacy user exists; backfill orphan rows to it ---
         row = conn.execute(
             "SELECT id FROM users WHERE device_id = 'legacy-device'"
@@ -178,6 +216,63 @@ def init_db() -> None:
                     )
             except (OSError, ValueError):
                 pass
+
+        # --- migration: reconstruct sessions for pre-existing attempts rows
+        #     that predate the sessions table. Must run after the
+        #     is_full_attempt self-heal above (it branches on that column
+        #     already holding valid 0/1 values) and after the user_id
+        #     backfill above (every attempts.user_id must already be
+        #     resolved). The old schema never persisted the base-attempt<->
+        #     retry link (a client's merge_attempt_id was only ever used
+        #     transiently within one request, never stored), so the exact
+        #     original retry topology can't be losslessly recovered -- this
+        #     walks each section's attempts in id order and reconstructs it
+        #     with the only heuristic the old data supports: every
+        #     is_full_attempt=1 row starts a brand-new finished session;
+        #     every is_full_attempt=0 row attaches as the next submission
+        #     onto whichever session most recently opened in that section
+        #     (or, defensively, becomes its own one-submission finished
+        #     session if no preceding full row exists there yet, so nothing
+        #     is silently dropped). Idempotent by construction: only rows
+        #     with session_id IS NULL are ever selected, so an already-
+        #     migrated row is never revisited on a later boot.
+        orphans = conn.execute(
+            "SELECT id, user_id, section_id, taken_at, score, total,"
+            " percent, is_full_attempt FROM attempts"
+            " WHERE session_id IS NULL ORDER BY id"
+        ).fetchall()
+        open_session: dict[int, dict[str, int]] = {}
+        for row in orphans:
+            sec_id = int(row["section_id"])
+            state = open_session.get(sec_id)
+            if row["is_full_attempt"] or state is None:
+                cur = conn.execute(
+                    "INSERT INTO sessions(user_id, section_id, status,"
+                    " started_at, finished_at, first_score, first_total,"
+                    " first_percent) VALUES (?, ?, 'finished', ?, ?, ?, ?, ?)",
+                    (
+                        row["user_id"],
+                        sec_id,
+                        row["taken_at"],
+                        row["taken_at"],
+                        row["score"],
+                        row["total"],
+                        row["percent"],
+                    ),
+                )
+                state = {"id": int(cur.lastrowid), "seq": 0}
+                open_session[sec_id] = state
+            state["seq"] += 1
+            conn.execute(
+                "UPDATE attempts SET session_id = ?, is_first_submission = ?,"
+                " submission_seq = ? WHERE id = ?",
+                (
+                    state["id"],
+                    1 if state["seq"] == 1 else 0,
+                    state["seq"],
+                    int(row["id"]),
+                ),
+            )
 
 
 # ---------------------------------------------------------------- users ----
@@ -243,9 +338,10 @@ def list_workbooks(conn: sqlite3.Connection, uid: int) -> list[dict[str, Any]]:
                (SELECT COUNT(*) FROM sections s WHERE s.workbook_id = w.id) AS section_count,
                (SELECT COUNT(*) FROM answer_keys k JOIN sections s2 ON k.section_id = s2.id
                  WHERE s2.workbook_id = w.id) AS problem_count,
-               (SELECT a.percent FROM attempts a JOIN sections s3 ON a.section_id = s3.id
-                 WHERE s3.workbook_id = w.id AND a.is_full_attempt = 1
-                 ORDER BY a.id DESC LIMIT 1) AS latest_percent
+               (SELECT sess.first_percent FROM sessions sess
+                 JOIN sections s3 ON sess.section_id = s3.id
+                 WHERE s3.workbook_id = w.id AND sess.status = 'finished'
+                 ORDER BY sess.id DESC LIMIT 1) AS latest_percent
         FROM workbooks w WHERE w.user_id = ? ORDER BY w.id DESC
         """,
         (uid,),
@@ -278,9 +374,10 @@ def get_workbook_summary(
                (SELECT COUNT(*) FROM sections s WHERE s.workbook_id = w.id) AS section_count,
                (SELECT COUNT(*) FROM answer_keys k JOIN sections s2 ON k.section_id = s2.id
                  WHERE s2.workbook_id = w.id) AS problem_count,
-               (SELECT a.percent FROM attempts a JOIN sections s3 ON a.section_id = s3.id
-                 WHERE s3.workbook_id = w.id AND a.is_full_attempt = 1
-                 ORDER BY a.id DESC LIMIT 1) AS latest_percent
+               (SELECT sess.first_percent FROM sessions sess
+                 JOIN sections s3 ON sess.section_id = s3.id
+                 WHERE s3.workbook_id = w.id AND sess.status = 'finished'
+                 ORDER BY sess.id DESC LIMIT 1) AS latest_percent
         FROM workbooks w WHERE w.id = ? AND w.user_id = ?
         """,
         (wid, uid),
@@ -315,12 +412,12 @@ def list_sections(
         """
         SELECT s.id, s.workbook_id, s.label, s.position,
                (SELECT COUNT(*) FROM answer_keys k WHERE k.section_id = s.id) AS problem_count,
-               (SELECT COUNT(*) FROM attempts a WHERE a.section_id = s.id
-                 AND a.is_full_attempt = 1) AS attempt_count,
-               (SELECT a.percent FROM attempts a WHERE a.section_id = s.id
-                 AND a.is_full_attempt = 1 ORDER BY a.id DESC LIMIT 1) AS latest_percent,
-               (SELECT MAX(a.percent) FROM attempts a WHERE a.section_id = s.id
-                 AND a.is_full_attempt = 1) AS best_percent
+               (SELECT COUNT(*) FROM sessions sess WHERE sess.section_id = s.id
+                 AND sess.status = 'finished') AS session_count,
+               (SELECT sess.first_percent FROM sessions sess WHERE sess.section_id = s.id
+                 AND sess.status = 'finished' ORDER BY sess.id DESC LIMIT 1) AS latest_percent,
+               (SELECT MAX(sess.first_percent) FROM sessions sess WHERE sess.section_id = s.id
+                 AND sess.status = 'finished') AS best_percent
         FROM sections s
         JOIN workbooks w ON w.id = s.workbook_id
         WHERE s.workbook_id = ? AND w.user_id = ?
@@ -461,6 +558,114 @@ def next_unique_label(
     return f"{label} ({i})"
 
 
+# ------------------------------------------------------------- sessions ----
+
+def get_open_session(
+    conn: sqlite3.Connection, sid: int, uid: int
+) -> dict[str, Any] | None:
+    """The section's currently in-progress session, if any (at most one can
+    exist at a time -- enforced by idx_sessions_one_open)."""
+    row = conn.execute(
+        "SELECT * FROM sessions WHERE section_id = ? AND user_id = ?"
+        " AND status = 'in_progress'",
+        (sid, uid),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def create_session(
+    conn: sqlite3.Connection,
+    uid: int,
+    sid: int,
+    first_score: int,
+    first_total: int,
+    first_percent: float,
+) -> int:
+    """Open a new session for a section, freezing its first submission's
+    score onto the row.
+
+    Races against idx_sessions_one_open (the DB-enforced "at most one open
+    session per section") are absorbed the same way
+    get_or_create_device_user absorbs its own device_id race: a losing
+    INSERT's IntegrityError is caught and the winner's open session is
+    re-read and returned instead.
+    """
+    try:
+        cur = conn.execute(
+            "INSERT INTO sessions(user_id, section_id, status, first_score,"
+            " first_total, first_percent) VALUES (?, ?, 'in_progress', ?, ?, ?)",
+            (uid, sid, first_score, first_total, first_percent),
+        )
+        return int(cur.lastrowid)
+    except sqlite3.IntegrityError:
+        existing = get_open_session(conn, sid, uid)
+        if not existing:  # pragma: no cover - defensive
+            raise
+        return int(existing["id"])
+
+
+def finish_session(
+    conn: sqlite3.Connection, session_id: int, uid: int
+) -> dict[str, Any] | None:
+    """Close a session ('채점 끝내기'), idempotently.
+
+    Returns None if the session doesn't exist (or isn't owned by uid). If
+    it's already finished, returns its row unchanged rather than erroring or
+    touching finished_at again.
+    """
+    sess = get_session(conn, session_id, uid)
+    if not sess:
+        return None
+    if sess["status"] == "in_progress":
+        conn.execute(
+            "UPDATE sessions SET status = 'finished',"
+            " finished_at = datetime('now', 'localtime') WHERE id = ?",
+            (session_id,),
+        )
+        sess = get_session(conn, session_id, uid)
+    return sess
+
+
+def list_finished_sessions(
+    conn: sqlite3.Connection, sid: int, uid: int
+) -> list[dict[str, Any]]:
+    rows = _q(
+        conn,
+        "SELECT * FROM sessions WHERE section_id = ? AND user_id = ?"
+        " AND status = 'finished' ORDER BY id DESC",
+        (sid, uid),
+    )
+    return [dict(r) for r in rows]
+
+
+def get_session(
+    conn: sqlite3.Connection, session_id: int, uid: int
+) -> dict[str, Any] | None:
+    row = conn.execute(
+        "SELECT * FROM sessions WHERE id = ? AND user_id = ?",
+        (session_id, uid),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def list_session_attempts(
+    conn: sqlite3.Connection, session_id: int
+) -> list[dict[str, Any]]:
+    """Every submission in a session, oldest first, each shaped like
+    get_attempt()'s output (its own per-question results included)."""
+    rows = _q(
+        conn,
+        "SELECT * FROM attempts WHERE session_id = ? ORDER BY submission_seq",
+        (session_id,),
+    )
+    out = []
+    for row in rows:
+        d = dict(row)
+        d["results"] = _attempt_results(conn, int(row["id"]))
+        out.append(d)
+    return out
+
+
 # ------------------------------------------------------------- attempts ----
 
 def delete_attempt(conn: sqlite3.Connection, aid: int, uid: int) -> bool:
@@ -495,6 +700,18 @@ def create_attempt(
     return aid
 
 
+def _attempt_results(conn: sqlite3.Connection, aid: int) -> list[dict[str, Any]]:
+    return [
+        dict(r)
+        for r in _q(
+            conn,
+            "SELECT number, expected, given, status FROM attempt_answers"
+            " WHERE attempt_id = ? ORDER BY number",
+            (aid,),
+        )
+    ]
+
+
 def get_attempt(
     conn: sqlite3.Connection, aid: int, uid: int
 ) -> dict[str, Any] | None:
@@ -504,15 +721,7 @@ def get_attempt(
     if not row:
         return None
     d = dict(row)
-    d["results"] = [
-        dict(r)
-        for r in _q(
-            conn,
-            "SELECT number, expected, given, status FROM attempt_answers"
-            " WHERE attempt_id = ? ORDER BY number",
-            (aid,),
-        )
-    ]
+    d["results"] = _attempt_results(conn, aid)
     return d
 
 
@@ -541,10 +750,11 @@ def top_missed(
                s.id AS section_id, w.id AS workbook_id, w.title AS workbook_title
         FROM attempt_answers aa
         JOIN attempts a ON a.id = aa.attempt_id
+        JOIN sessions sess ON sess.id = a.session_id
         JOIN sections s ON s.id = a.section_id
         JOIN workbooks w ON w.id = s.workbook_id
         WHERE w.id = ? AND w.user_id = ? AND aa.status != 'correct'
-              AND a.is_full_attempt = 1
+              AND a.is_first_submission = 1 AND sess.status = 'finished'
         GROUP BY s.id, aa.number
         ORDER BY count DESC, aa.number
         LIMIT ?
