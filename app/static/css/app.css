@@ -1066,6 +1066,16 @@ button.chip:hover { filter: brightness(.96); box-shadow: 0 0 0 3px rgba(15, 23, 
 }
 
 /* --------------------------------------------------------------------------
+   Celebration (100% first-submission confetti canvas)
+   -------------------------------------------------------------------------- */
+.celebration-canvas {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  pointer-events: none;
+}
+
+/* --------------------------------------------------------------------------
    Responsive
    -------------------------------------------------------------------------- */
 @media (min-width: 640px) {

@@ -244,6 +244,91 @@
     `<a class="back-link" href="${esc(href)}">${ic('arrowLeft', 14)} ${esc(label)}</a>`;
 
   /* ------------------------------------------------------------------
+   * Celebration -- confetti burst for a session's first-submission 100%.
+   * One persistent canvas, lazily created as a <body> sibling of #view (like
+   * #toasts) so router screen swaps (view.innerHTML = ...) never tear it
+   * down mid-burst. Self-contained: no CDN/library, just Canvas 2D + rAF.
+   * ------------------------------------------------------------------ */
+  let celebrationCanvas = null;
+  let celebrationRaf = null;
+
+  function stopCelebration() {
+    if (celebrationRaf != null) {
+      cancelAnimationFrame(celebrationRaf);
+      celebrationRaf = null;
+    }
+    if (celebrationCanvas) {
+      const ctx = celebrationCanvas.getContext('2d');
+      if (ctx) ctx.clearRect(0, 0, celebrationCanvas.width, celebrationCanvas.height);
+    }
+  }
+
+  function celebrate() {
+    // Canvas particles driven by rAF aren't CSS animation/transition, so the
+    // project's global reduced-motion rule (app.css) can't clamp them --
+    // this explicit check is what keeps that accessibility guarantee here.
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+    stopCelebration(); // no stacked runs if triggered again before finishing
+
+    if (!celebrationCanvas) {
+      celebrationCanvas = document.createElement('canvas');
+      celebrationCanvas.className = 'celebration-canvas';
+      document.body.appendChild(celebrationCanvas);
+    }
+    const canvas = celebrationCanvas;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const colors = ['--accent', '--green', '--amber', '--red']
+      .map((name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim())
+      .filter(Boolean);
+    if (!colors.length) return;
+
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    canvas.width = w;
+    canvas.height = h;
+
+    const DURATION_MS = 2800;
+    const GRAVITY = 0.12;
+    const particles = Array.from({ length: 130 }, () => ({
+      x: Math.random() * w,
+      y: -20 - Math.random() * h * 0.3,
+      size: 5 + Math.random() * 5,
+      color: colors[Math.floor(Math.random() * colors.length)],
+      vx: (Math.random() - 0.5) * 3,
+      vy: 2 + Math.random() * 2,
+      rotation: Math.random() * 360,
+      spin: (Math.random() - 0.5) * 14
+    }));
+
+    const startedAt = performance.now();
+    const frame = (now) => {
+      ctx.clearRect(0, 0, w, h);
+      particles.forEach((p) => {
+        p.vy += GRAVITY;
+        p.x += p.vx;
+        p.y += p.vy;
+        p.rotation += p.spin;
+        ctx.save();
+        ctx.translate(p.x, p.y);
+        ctx.rotate((p.rotation * Math.PI) / 180);
+        ctx.fillStyle = p.color;
+        ctx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size * 0.6);
+        ctx.restore();
+      });
+      if (now - startedAt < DURATION_MS) {
+        celebrationRaf = requestAnimationFrame(frame);
+      } else {
+        celebrationRaf = null;
+        ctx.clearRect(0, 0, w, h);
+      }
+    };
+    celebrationRaf = requestAnimationFrame(frame);
+  }
+
+  /* ------------------------------------------------------------------
    * Router
    * ------------------------------------------------------------------ */
   function parseRoute() {
@@ -1718,6 +1803,10 @@
       requestAnimationFrame(() => {
         const ring = $('#ring-fg');
         if (ring) ring.style.strokeDashoffset = String(targetOffset);
+        // Gated on is_first_submission, not percent alone -- a retry that
+        // also happens to score 100% is not the session's recorded
+        // first-submission accuracy (see isRetry/retryNoteHtml above).
+        if (attempt.is_first_submission === true && percent === 100) celebrate();
       });
     });
 
@@ -1941,6 +2030,9 @@
       requestAnimationFrame(() => {
         const ring = $('#ring-fg');
         if (ring) ring.style.strokeDashoffset = String(targetOffset);
+        // This screen only ever shows the session's frozen first submission,
+        // so percent === 100 alone unambiguously means a first-try 100%.
+        if (percent === 100) celebrate();
       });
     });
 
@@ -2170,6 +2262,9 @@
    * Boot
    * ------------------------------------------------------------------ */
   window.addEventListener('hashchange', render);
+  // Navigating away mid-burst must not leave a stray celebration rAF loop
+  // running under the screen that replaces it.
+  window.addEventListener('hashchange', stopCelebration);
 
   async function boot() {
     getDeviceUserId(); // ensure a device UUID exists before the first request
