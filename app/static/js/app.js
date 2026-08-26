@@ -269,6 +269,10 @@
       const id = parseInt(parts[1], 10);
       if (Number.isInteger(id)) return { name: 'attempt', id };
     }
+    if (parts[0] === 'session' && parts[1]) {
+      const id = parseInt(parts[1], 10);
+      if (Number.isInteger(id)) return { name: 'session', id };
+    }
     return { name: 'library' };
   }
 
@@ -290,6 +294,7 @@
       case 'workbook': await guard(() => viewWorkbook(route.id)); break;
       case 'solve':    await guard(() => viewSolve(route.id)); break;
       case 'attempt':  await guard(() => viewAttempt(route.id)); break;
+      case 'session':  await guard(() => viewSessionDetail(route.id)); break;
       default:         await guard(viewLibrary);
     }
   }
@@ -1254,19 +1259,24 @@
         if (!willOpen || panel.dataset.loaded === '1') return;
         panel.innerHTML = '<p class="muted" style="font-size:13px;">불러오는 중…</p>';
         try {
-          const attempts = await api(`/sections/${sid}/attempts`);
+          // One row per FINISHED session -- one history entry per session,
+          // not per submission. An open session never appears here (it's
+          // surfaced by the "이어서 풀기" resume button instead), and each
+          // row shows the session's frozen first-submission score, which is
+          // what actually counts toward this section's history/aggregates.
+          const sessions = await api(`/sections/${sid}/sessions`);
           panel.dataset.loaded = '1';
-          if (!attempts || !attempts.length) {
+          if (!sessions || !sessions.length) {
             panel.innerHTML = '<p class="muted" style="font-size:13px;">아직 응시 기록이 없습니다.</p>';
             return;
           }
-          panel.innerHTML = attempts.map((a) => `
+          panel.innerHTML = sessions.map((s) => `
             <div class="attempt-row">
-              <span class="att-date">${esc(fmtDate(a.taken_at))}</span>
-              <span class="att-score">${Number(a.score)}/${Number(a.total)}</span>
+              <span class="att-date">${esc(fmtDate(s.finished_at))}</span>
+              <span class="att-score">${Number(s.first_score)}/${Number(s.first_total)}</span>
               <span class="spacer"></span>
-              <a href="#/attempt/${Number(a.id)}" class="badge ${pctBadgeClass(a.percent)}"
-                 style="text-decoration:none;">${esc(pctText(a.percent))}</a>
+              <a href="#/session/${Number(s.session_id)}" class="badge ${pctBadgeClass(s.first_percent)}"
+                 style="text-decoration:none;">${esc(pctText(s.first_percent))}</a>
             </div>`).join('');
         } catch (err) {
           panel.innerHTML = `<p class="muted" style="font-size:13px;">${esc(err.message)}</p>`;
@@ -1712,6 +1722,182 @@
         setPending(btn, false);
         toast(err.message, 'error');
       }
+    });
+
+    focusTitle();
+  }
+
+  /* ==================================================================
+   * View: Session detail / history entry (#/session/:id)
+   *
+   * One finished session = one history entry. Reused both as the screen
+   * "채점 끝내기" lands on (Results screen, and the quiz screen's
+   * all-caught-up state) and as the click-through target for a past row in
+   * a section card's "응시 기록 보기" panel -- there is one "finished
+   * session" screen, not two.
+   * ================================================================== */
+  async function viewSessionDetail(sessId) {
+    const detail = await api(`/sessions/${sessId}`);
+    const secInfo = await api(`/sections/${detail.section_id}`).catch(() => null);
+
+    const results = detail.first_results || [];
+    const wrongItems = results.filter((r) => r.status !== 'correct');
+    let nCorrect;
+    let nWrong;
+    let nSkipped;
+    if (results.length) {
+      nCorrect = results.filter((r) => r.status === 'correct').length;
+      nWrong = results.filter((r) => r.status === 'incorrect').length;
+      nSkipped = results.length - nCorrect - nWrong;
+    } else {
+      // Defensive fallback for a session whose first-submission snapshot is
+      // unexpectedly missing -- every submission always writes its own
+      // per-question results, so this shouldn't happen, but it avoids
+      // rendering a false "perfect score" banner if it ever does.
+      nCorrect = Number(detail.first_score || 0);
+      nWrong = Math.max(Number(detail.first_total || 0) - nCorrect, 0);
+      nSkipped = 0;
+    }
+    const wrongCount = results.length ? wrongItems.length : nWrong + nSkipped;
+
+    const percent = Number(detail.first_percent || 0);
+    const R = 84;
+    const C = 2 * Math.PI * R;
+    const ringColor = percent >= 80 ? 'var(--green)' : percent >= 50 ? 'var(--amber)' : 'var(--red)';
+    const targetOffset = C * (1 - Math.min(Math.max(percent, 0), 100) / 100);
+
+    const wrongHtml = results.length
+      ? (wrongItems.length
+          ? `<ul class="wrong-list">
+              ${wrongItems.map((r) => `
+                <li class="wrong-card ${r.status === 'unanswered' ? 'unanswered' : ''}">
+                  <span class="wc-num">${Number(r.number)}</span>
+                  <span class="wc-body">
+                    <span class="wc-line">내 답 <b>${r.given ? esc(r.given) : '(미응답)'}</b></span>
+                    <span class="wc-reveal-row">
+                      <button type="button" class="btn btn-secondary btn-sm reveal-btn"
+                              aria-expanded="false" aria-controls="sess-ans-${Number(r.number)}">
+                        ${ic('target', 14)} 정답보기
+                      </button>
+                      <span class="wc-line wc-answer" id="sess-ans-${Number(r.number)}" hidden>
+                        정답 <b>${esc(r.expected)}</b>
+                      </span>
+                    </span>
+                  </span>
+                  <span class="wc-status">${esc(STATUS_NAMES[r.status] || r.status)}</span>
+                </li>`).join('')}
+            </ul>`
+          : `<div class="all-correct">${ic('check', 18)} 첫 제출에서 전 문항 정답입니다. 완벽해요!</div>`)
+      : (nWrong + nSkipped > 0
+          ? `<p class="muted" style="font-size:14px;">첫 제출의 문항별 기록을 불러올 수 없습니다.</p>`
+          : `<div class="all-correct">${ic('check', 18)} 첫 제출에서 전 문항 정답입니다. 완벽해요!</div>`);
+
+    // breakdown.total_questions is the section's FULL answer-key count --
+    // deliberately not the same number as first_total (the score ring's
+    // own denominator above), which narrows to the answered subset when
+    // answered_only was used on the first submission. Both get their own
+    // explicit label below so the two percentages never read as
+    // contradictory.
+    const bd = detail.breakdown || {
+      total_questions: 0,
+      first_try: { numbers: [], count: 0, percent: 0 },
+      second_try: { numbers: [], count: 0, percent: 0 },
+      third_plus: { numbers: [], count: 0, percent: 0 }
+    };
+
+    const numChips = (numbers) => (numbers && numbers.length)
+      ? `<div class="num-chip-list">${numbers.map((n) => `<span class="num-chip">${Number(n)}</span>`).join('')}</div>`
+      : `<p class="breakdown-empty">해당 문항 없음</p>`;
+
+    const breakdownBlock = (cls, badgeCls, title, bucket) => `
+      <div class="breakdown-card bd-${cls}">
+        <div class="breakdown-head">
+          <span class="breakdown-title">${esc(title)}</span>
+          <span class="badge ${badgeCls}">${pctText(bucket.percent)}</span>
+          <span class="breakdown-count">${Number(bucket.count)} / ${Number(bd.total_questions)}문항</span>
+        </div>
+        ${numChips(bucket.numbers)}
+      </div>`;
+
+    const wbHref = secInfo && secInfo.workbook_id ? `#/wb/${secInfo.workbook_id}` : '#/';
+
+    view.innerHTML = `
+      <section class="page" aria-label="채점 기록 상세">
+        ${backLink(wbHref, '목록으로 돌아가기')}
+        <div class="page-head">
+          <div>
+            <h1 class="page-title" tabindex="-1">채점 기록 상세</h1>
+            <p class="sub">${esc(secInfo ? `${secInfo.workbook_title || ''} · ${secInfo.label || ''}` : `세션 #${detail.session_id}`)}
+               · ${esc(fmtDate(detail.finished_at || detail.started_at))} 완료 · 총 ${Number(detail.submission_count || 0)}번 제출</p>
+          </div>
+        </div>
+
+        <div class="card result-hero">
+          <p class="sub score-basis-note">기록에 남는 점수 — 첫 제출 <b>${Number(detail.first_total)}문항</b> 기준</p>
+          <div class="ring-wrap">
+            <svg viewBox="0 0 200 200" role="img" aria-label="점수 ${Math.round(percent)}%">
+              <circle class="ring-bg" cx="100" cy="100" r="${R}"
+                      fill="none" stroke-width="16"></circle>
+              <circle class="ring-fg" id="ring-fg" cx="100" cy="100" r="${R}"
+                      fill="none" stroke="${ringColor}" stroke-width="16" stroke-linecap="round"
+                      stroke-dasharray="${C.toFixed(2)}" stroke-dashoffset="${C.toFixed(2)}"></circle>
+            </svg>
+            <div class="ring-center">
+              <span class="ring-pct">${Math.round(percent)}%</span>
+              <span class="ring-sub">${Number(detail.first_score)} / ${Number(detail.first_total)} 맞힘</span>
+            </div>
+          </div>
+
+          <div class="chips">
+            <span class="stat-chip ok">${ic('check', 14)} 정답 ${nCorrect}</span>
+            <span class="stat-chip bad">${ic('x', 14)} 오답 ${nWrong}</span>
+            <span class="stat-chip skip">${ic('alert', 14)} 미응답 ${nSkipped}</span>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:14px;">
+          <h2 style="font-size:16px;font-weight:800;margin-bottom:4px;">첫 제출에서 틀린 문제 ${wrongCount}개</h2>
+          <p class="sub" style="margin-bottom:12px;">이 세션의 기록 점수를 만든 첫 제출 결과예요 — 정답은 [정답보기]를 누르면 확인할 수 있어요.</p>
+          ${wrongHtml}
+        </div>
+
+        <div class="card" style="margin-top:14px;">
+          <h2 style="font-size:16px;font-weight:800;margin-bottom:4px;">시도 횟수별 정답 분포</h2>
+          <p class="sub breakdown-denom-note">
+            아래 비율은 이 섹션 전체 <b>${Number(bd.total_questions)}문항</b> 기준이에요 — 위 점수의 분모(첫 제출
+            <b>${Number(detail.first_total)}문항</b> 기준)와 다를 수 있어요. '응답한 문항만 채점'을 사용했다면 첫 제출
+            당시 실제로 답한 문항 수만 그 분모가 되기 때문이에요. 한 번도 정답을 맞히지 못한 문항(미응답 포함)은
+            '3차 이상'에 포함됩니다.
+          </p>
+          <div class="breakdown-grid">
+            ${breakdownBlock('first', 'badge-green', '1차에 정답', bd.first_try)}
+            ${breakdownBlock('second', 'badge-amber', '2차에 정답', bd.second_try)}
+            ${breakdownBlock('third', 'badge-red', '3차 이상 (미해결 포함)', bd.third_plus)}
+          </div>
+        </div>
+      </section>`;
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const ring = $('#ring-fg');
+        if (ring) ring.style.strokeDashoffset = String(targetOffset);
+      });
+    });
+
+    /* --- deferred answer reveal: one toggle per wrong card --- */
+    view.querySelectorAll('.reveal-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const card = btn.closest('.wrong-card');
+        const answer = card && card.querySelector('.wc-answer');
+        if (!answer) return;
+        const willShow = answer.hidden;
+        answer.hidden = !willShow;
+        card.classList.toggle('revealed', willShow);
+        btn.setAttribute('aria-expanded', String(willShow));
+        btn.innerHTML = willShow
+          ? `${ic('x', 14)} 정답 숨기기`
+          : `${ic('target', 14)} 정답보기`;
+      });
     });
 
     focusTitle();

@@ -769,6 +769,48 @@ button.chip:hover { filter: brightness(.96); box-shadow: 0 0 0 3px rgba(15, 23, 
 .wrong-card.unanswered .wc-status { background: var(--amber-soft); color: var(--amber-text); }
 
 /* --------------------------------------------------------------------------
+   Session detail (#/session/:id): try-count breakdown
+   -------------------------------------------------------------------------- */
+.score-basis-note { margin-bottom: 2px; font-weight: 600; }
+.breakdown-denom-note { margin-bottom: 12px; }
+.breakdown-denom-note b { color: var(--text); }
+
+.breakdown-grid { display: grid; gap: 10px; }
+.breakdown-card {
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+}
+.breakdown-card.bd-first  { border-left-color: var(--green); }
+.breakdown-card.bd-second { border-left-color: var(--amber); }
+.breakdown-card.bd-third  { border-left-color: var(--red); }
+.breakdown-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.breakdown-title { font-weight: 800; font-size: 14.5px; }
+.breakdown-count { color: var(--muted); font-size: 12.5px; margin-left: auto; }
+.breakdown-empty { color: var(--muted); font-size: 13px; }
+
+.num-chip-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.num-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  height: 26px;
+  padding: 0 6px;
+  border-radius: 7px;
+  background: var(--bg);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+/* --------------------------------------------------------------------------
    Extraction preview: segmentation sub-headings
    -------------------------------------------------------------------------- */
 .seg-group .group-head th {
@@ -1050,6 +1092,7 @@ button.chip:hover { filter: brightness(.96); box-shadow: 0 0 0 3px rgba(15, 23, 
 @media (min-width: 900px) {
   .grid-books { grid-template-columns: repeat(3, 1fr); }
   .sections-grid { grid-template-columns: repeat(3, 1fr); }
+  .breakdown-grid { grid-template-columns: repeat(3, 1fr); }
   .stack-two-col {
     display: grid;
     grid-template-columns: 5fr 7fr;
