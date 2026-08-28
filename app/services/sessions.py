@@ -53,28 +53,54 @@ def compute_breakdown(
     per-question grading as `results: [{"number": ..., "status": ...}, ...]`
     (the shape dal.list_session_attempts already returns); scanned in
     submission_seq order (re-sorted here so callers don't have to guarantee
-    it) to find, per question number, the submission_seq at which its
-    status first became 'correct'.
+    it).
+
+    The bucket a question lands in is driven by its own real-try index, NOT
+    by the raw submission_seq of the round it was first correct on. A
+    question's real-try index is its ordinal position (1st, 2nd, 3rd, ...)
+    among only the rounds where that question actually got a real answer --
+    every round where its row is missing, or present with status
+    'unanswered' (skipped that round), doesn't count as a try at all and is
+    skipped over. So a question left blank in round 1 and answered
+    correctly the instant it's finally attempted in round 2 is `first_try`,
+    not `second_try`: the raw round number proves nothing about how many
+    times *that question* was actually tried. As before, only the FIRST
+    round a question goes correct is ever recorded -- a later round that
+    reverts it (e.g. an explicit retraction) doesn't move its bucket.
+
+    One interpretive wrinkle worth flagging: `merge_answers` (same file)
+    carries a previously-given value forward into every later round's
+    merged answer set unless it's explicitly retracted, so a question
+    answered once and never revisited still produces a fresh non-
+    'unanswered' row -- and hence a fresh real-try increment -- on every
+    subsequent round. Per spec only 'unanswered' rows are excluded from the
+    real-try count, so these carried-forward rows count the same as a
+    freshly retyped answer; this can only ever advance a question's real-
+    try count, never its bucket, since (per above) only the first correct
+    occurrence is ever recorded.
 
     A number that's never correct in any submission -- including one never
     answered at all -- lands in third_plus, per spec: that bucket is
     literally "took 3+ tries, or never got there."
     """
     ordered = sorted(attempts, key=lambda a: a["submission_seq"])
-    first_correct_seq: dict[int, int] = {}
+    real_try_count: dict[int, int] = {}
+    first_correct_try_index: dict[int, int] = {}
     for att in ordered:
-        seq = att["submission_seq"]
         for r in att.get("results", []):
+            if r["status"] == "unanswered":
+                continue  # not a real attempt at this question this round
             num = int(r["number"])
-            if r["status"] == "correct" and num not in first_correct_seq:
-                first_correct_seq[num] = seq
+            real_try_count[num] = real_try_count.get(num, 0) + 1
+            if r["status"] == "correct" and num not in first_correct_try_index:
+                first_correct_try_index[num] = real_try_count[num]
 
     first_try, second_try, third_plus = [], [], []
     for num in all_numbers:
-        seq = first_correct_seq.get(num)
-        if seq == 1:
+        idx = first_correct_try_index.get(num)
+        if idx == 1:
             first_try.append(num)
-        elif seq == 2:
+        elif idx == 2:
             second_try.append(num)
         else:
             third_plus.append(num)

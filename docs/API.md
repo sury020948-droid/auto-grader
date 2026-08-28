@@ -85,9 +85,14 @@ SessionDetail { // ...every Session field, plus:
                                "first_try":  { "numbers": [1,2,"..."], "count": 15, "percent": 75.0 },
                                "second_try": { "numbers": [7,9],       "count": 2,  "percent": 10.0 },
                                "third_plus": { "numbers": [3,12,17],   "count": 3,  "percent": 15.0 } } }
-                // breakdown groups every number in the section's full answer key by the
-                // submission_seq at which it was FIRST answered correctly across the whole
-                // session; third_plus also holds any number never answered correctly at all.
+                // breakdown groups every number in the section's full answer key by that
+                // number's own real-try index -- its ordinal position (1st/2nd/3rd+) among
+                // only the submissions where it actually got a non-blank answer, ignoring
+                // rounds it was left unanswered/skipped -- at which it was FIRST answered
+                // correctly. So a number skipped in round 1 and answered correctly the
+                // moment it's first attempted, in round 2, is first_try, not second_try; the
+                // raw submission_seq of the round plays no part. third_plus also holds any
+                // number never answered correctly at all (including one never answered).
 
 OpenSession   { "session_id": 4, "section_id": 3, "started_at": "...",
                 "submission_count": 2, "latest_attempt": AttemptResult }

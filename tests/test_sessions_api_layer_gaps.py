@@ -39,10 +39,16 @@ Angles targeted here that the implementation's own tests never touch:
   * `attempt_count` is genuinely absent from GET /workbooks/{wid}/stats'
     per-section dict -- the *router's* own hand-built dict, distinct from
     the DAL-level list_sections check test_sessions_dal_more.py already has.
-  * compute_breakdown's `seq >= 3` arm of third_plus (a question actually
-    corrected on the 3rd try) -- every existing third_plus assertion, at
-    both the pure-function and HTTP layers, only ever exercises the "never
-    correct" arm of that same bucket.
+  * compute_breakdown's "real-try index >= 3" arm of third_plus (a question
+    actually corrected on its 3rd real try) -- every existing third_plus
+    assertion, at both the pure-function and HTTP layers, only ever
+    exercises the "never correct" arm of that same bucket.
+  * compute_breakdown buckets by a question's own real-try index (its
+    ordinal position among only the rounds it actually got a non-blank
+    answer), decoupled from the raw submission_seq of the round -- a
+    question left unanswered in an early round and genuinely answered for
+    the first time in a later one must bucket by how many times *that
+    question* was actually tried, not by which round number it landed in.
   * merge_answers' whitespace handling (a whitespace-only value is treated
     as blank on both sides of the merge) and that a stored value is kept
     verbatim (not re-stripped) -- edge cases the existing "verbatim port"
@@ -122,14 +128,14 @@ class TestMergeAnswersWhitespaceEdgeCases:
 
 
 # ---------------------------------------------------------------------------
-# Pure-function edge case: compute_breakdown's "seq >= 3" arm of third_plus,
-# as distinct from its "never correct" arm (the only one exercised
-# elsewhere).
+# Pure-function edge case: compute_breakdown's "real-try index >= 3" arm of
+# third_plus, as distinct from its "never correct" arm (the only one
+# exercised elsewhere).
 # ---------------------------------------------------------------------------
 
 
 class TestComputeBreakdownThirdTryActuallyCorrect:
-    def test_third_submission_correct_lands_in_third_plus_via_seq_not_never(self):
+    def test_third_real_try_correct_lands_in_third_plus_via_index_not_never(self):
         attempts = [
             {"submission_seq": 1, "results": [{"number": 1, "status": "incorrect"}]},
             {"submission_seq": 2, "results": [{"number": 1, "status": "incorrect"}]},
@@ -141,9 +147,10 @@ class TestComputeBreakdownThirdTryActuallyCorrect:
         assert out["second_try"]["numbers"] == []
 
     def test_actually_third_try_and_never_correct_land_in_the_same_bucket(self):
-        """third_plus is one bucket for two different causes (spec: seq>=3
-        OR never correct) -- a genuinely-corrected-on-try-3 number and a
-        never-correct number must land there side by side."""
+        """third_plus is one bucket for two different causes (spec:
+        real-try index >= 3 OR never correct) -- a genuinely-corrected-
+        on-try-3 number and a never-correct number must land there side by
+        side."""
         attempts = [
             {
                 "submission_seq": 1,
@@ -165,16 +172,95 @@ class TestComputeBreakdownThirdTryActuallyCorrect:
         assert sorted(out["third_plus"]["numbers"]) == [1, 2]
 
     def test_first_correct_occurrence_wins_even_if_a_later_submission_reverts(self):
-        """The spec records the seq of the *first* correct occurrence -- a
-        number correct on try 1 must stay bucketed there even if a later
-        submission's row for that same number (e.g. after an explicit
-        retraction) is no longer 'correct'."""
+        """The spec records the real-try index of the *first* correct
+        occurrence -- a number correct on try 1 must stay bucketed there
+        even if a later submission's row for that same number (e.g. after
+        an explicit retraction) is no longer 'correct'."""
         attempts = [
             {"submission_seq": 1, "results": [{"number": 1, "status": "correct"}]},
             {"submission_seq": 2, "results": [{"number": 1, "status": "unanswered"}]},
         ]
         out = compute_breakdown([1], attempts)
         assert out["first_try"]["numbers"] == [1]
+        assert out["third_plus"]["numbers"] == []
+
+
+# ---------------------------------------------------------------------------
+# Interpretation B: a question's bucket is driven by the ordinal position of
+# its own real (non-'unanswered') answer submissions, not by the raw
+# submission_seq of the round. These are the scenarios where that actually
+# diverges from the old (interpretation A) submission_seq-based reading --
+# no fixture anywhere else in the repo exercises a question left unanswered
+# in an early round and genuinely answered for the first time in a later
+# one, so these are the load-bearing regression cases for the distinction.
+# ---------------------------------------------------------------------------
+
+
+class TestComputeBreakdownRealTryIndexNotRawSeq:
+    def test_skipped_round_one_then_correct_round_two_is_first_try_not_second(self):
+        """Q1 has no real answer in round 1 (status 'unanswered' -- e.g. an
+        answered_only submission that left it blank) and is answered
+        correctly the instant it's first actually attempted, in round 2.
+        Interpretation A would bucket this as second_try off the raw
+        submission_seq (2); interpretation B buckets it as first_try, since
+        round 2 is the FIRST round Q1 ever got a real answer."""
+        attempts = [
+            {"submission_seq": 1, "results": [{"number": 1, "status": "unanswered"}]},
+            {"submission_seq": 2, "results": [{"number": 1, "status": "correct"}]},
+        ]
+        out = compute_breakdown([1], attempts)
+        assert out["first_try"]["numbers"] == [1]
+        assert out["second_try"]["numbers"] == []
+        assert out["third_plus"]["numbers"] == []
+
+    def test_skipped_round_one_wrong_round_two_correct_round_three_is_second_try(self):
+        """Q1: unanswered in round 1 (skipped), wrong on its first real try
+        (round 2), correct on its second real try (round 3).
+        Interpretation A would land this in third_plus off the raw
+        submission_seq (3); interpretation B buckets it as second_try,
+        since round 3 is only the *second* round Q1 ever got a real
+        answer -- proving the bucket is decoupled from the raw round
+        number."""
+        attempts = [
+            {"submission_seq": 1, "results": [{"number": 1, "status": "unanswered"}]},
+            {"submission_seq": 2, "results": [{"number": 1, "status": "incorrect"}]},
+            {"submission_seq": 3, "results": [{"number": 1, "status": "correct"}]},
+        ]
+        out = compute_breakdown([1], attempts)
+        assert out["first_try"]["numbers"] == []
+        assert out["second_try"]["numbers"] == [1]
+        assert out["third_plus"]["numbers"] == []
+
+    def test_skipped_in_every_round_still_lands_in_third_plus(self):
+        """A question skipped ('unanswered') in every round it was ever
+        presented is still 'never answered correctly' and belongs in
+        third_plus, same as under interpretation A -- excluding
+        'unanswered' rows from the real-try count must not be confused with
+        excluding the question from bucketing altogether."""
+        attempts = [
+            {"submission_seq": 1, "results": [{"number": 1, "status": "unanswered"}]},
+            {"submission_seq": 2, "results": [{"number": 1, "status": "unanswered"}]},
+        ]
+        out = compute_breakdown([1], attempts)
+        assert out["first_try"]["numbers"] == []
+        assert out["second_try"]["numbers"] == []
+        assert out["third_plus"]["numbers"] == [1]
+
+    def test_carried_forward_answer_still_only_counts_first_correct_occurrence(self):
+        """A question correct on real try 1 and never touched again still
+        gets a fresh non-'unanswered' row every later round too (merge_
+        answers carries the previous answer forward unchanged) -- a fresh
+        real-try increment each round, per spec, but the bucket is still
+        driven by the FIRST correct occurrence only, so the extra
+        carried-forward rounds can never move it out of first_try."""
+        attempts = [
+            {"submission_seq": 1, "results": [{"number": 1, "status": "correct"}]},
+            {"submission_seq": 2, "results": [{"number": 1, "status": "correct"}]},
+            {"submission_seq": 3, "results": [{"number": 1, "status": "correct"}]},
+        ]
+        out = compute_breakdown([1], attempts)
+        assert out["first_try"]["numbers"] == [1]
+        assert out["second_try"]["numbers"] == []
         assert out["third_plus"]["numbers"] == []
 
 

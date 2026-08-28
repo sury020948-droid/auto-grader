@@ -606,7 +606,16 @@ class TestSessionsServiceUnit:
         latest_results = [{"number": 1, "given": "", "status": "unanswered"}]
         assert merge_answers(latest_results, {}) == {}
 
-    def test_compute_breakdown_buckets_by_first_correct_submission_seq(self):
+    def test_compute_breakdown_buckets_by_first_correct_real_try_index(self):
+        """Buckets each number by the ordinal position of its first real
+        (non-'unanswered') correct submission, not by the raw
+        submission_seq of the round it happened on. Nothing in this
+        particular fixture is skipped in one round and answered in a later
+        one, so each present row is also a real try and the real-try index
+        happens to coincide with submission_seq here -- see
+        TestComputeBreakdownRealTryIndexNotRawSeq in
+        test_sessions_api_layer_gaps.py for the scenarios where they
+        diverge."""
         all_numbers = [1, 2, 3, 4]
         attempts = [
             {
