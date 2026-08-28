@@ -101,7 +101,31 @@ def read_session_detail(
     atts = dal.list_session_attempts(conn, sess["id"])
     first = next((a for a in atts if a["is_first_submission"]), None)
     keys = dal.get_keys(conn, sess["section_id"], uid)
-    breakdown = compute_breakdown(sorted(keys), atts)
+    # When the first submission used answered_only grading and actually left
+    # some numbers unanswered, its own `total` already narrows to just the
+    # numbers it answered (services/grader.py's grade()) -- scope the
+    # breakdown to that SAME subset instead of the section's full key set,
+    # so total_questions and every try-count bucket agree with first_total
+    # rather than silently counting numbers the first submission never even
+    # saw. Same `total < len(results)` inference app.js's viewAttempt()/
+    # viewSessionDetail() and dal.top_missed() already use to detect this,
+    # checked against THIS attempt's own results rather than a fresh key
+    # re-query, so it stays correct even if the section's answer key is
+    # edited after the session exists. Falls back to the full key set for
+    # an ordinary session, or an answered_only one that skipped nothing.
+    #
+    # This subset is frozen to whatever the first submission answered and
+    # never grows -- a number skipped in round 1 but genuinely answered
+    # (even correctly) in a later retry round of the same session stays
+    # excluded from the breakdown, exactly mirroring how first_total itself
+    # is permanently frozen to round 1 and never recomputed on a retry.
+    if first and int(first["total"]) < len(first["results"]):
+        all_numbers = sorted(
+            r["number"] for r in first["results"] if r["status"] != "unanswered"
+        )
+    else:
+        all_numbers = sorted(keys)
+    breakdown = compute_breakdown(all_numbers, atts)
     return {
         **_serialize_session(sess),
         "submission_count": len(atts),

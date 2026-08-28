@@ -1445,11 +1445,25 @@
 
     const resumeMode = openSession !== null;
     const latest = resumeMode ? openSession.latest_attempt : null;
+    const latestResults = latest?.results || [];
+    // Same answered_only narrowing inference as viewAttempt()/
+    // viewSessionDetail() below: when the latest submission's own `total`
+    // is smaller than its full `results` array, it was graded with
+    // answered_only and left some numbers completely unanswered rather than
+    // grading them wrong. Those were never actually attempted, so they're
+    // not "wrong answers to retry" -- hide their input entirely instead of
+    // rendering an empty one for a question the student never even saw
+    // last round. (GET /sections/{sid}/session's own `results` stay fully
+    // unfiltered on purpose -- this is a client-side-only cut here, same as
+    // the other two sites' identical filter on the same field.)
+    const narrowedByAnsweredOnly =
+      latestResults.length > 0 && Number(latest?.total) < latestResults.length;
     // "Which numbers still need retrying" and "what was answered last time"
     // both come straight from the open session's latest submission snapshot.
     const remainingResults = resumeMode
-      ? (latest?.results || [])
+      ? latestResults
           .filter((r) => r.status !== 'correct')
+          .filter((r) => !narrowedByAnsweredOnly || r.status !== 'unanswered')
           .sort((a, b) => Number(a.number) - Number(b.number))
       : [];
     const givenByNumber = new Map(
@@ -1941,12 +1955,15 @@
           ? `<p class="muted" style="font-size:14px;">첫 제출의 문항별 기록을 불러올 수 없습니다.</p>`
           : `<div class="all-correct">${ic('check', 18)} 첫 제출에서 전 문항 정답입니다. 완벽해요!</div>`);
 
-    // breakdown.total_questions is the section's FULL answer-key count --
-    // deliberately not the same number as first_total (the score ring's
-    // own denominator above), which narrows to the answered subset when
-    // answered_only was used on the first submission. Both get their own
-    // explicit label below so the two percentages never read as
-    // contradictory.
+    // breakdown.total_questions always matches first_total (the score
+    // ring's own denominator above): the router (routers/sessions.py)
+    // scopes all_numbers to the first submission's own answered subset
+    // whenever that submission used answered_only to skip some numbers --
+    // the exact same subset first_total is already computed over -- so a
+    // number the first submission never even saw is excluded from both
+    // denominators alike, not just from first_total. See
+    // compute_breakdown()'s docstring (services/sessions.py) for the full
+    // contract.
     const bd = detail.breakdown || {
       total_questions: 0,
       first_try: { numbers: [], count: 0, percent: 0 },
@@ -2013,10 +2030,9 @@
         <div class="card" style="margin-top:14px;">
           <h2 style="font-size:16px;font-weight:800;margin-bottom:4px;">시도 횟수별 정답 분포</h2>
           <p class="sub breakdown-denom-note">
-            아래 비율은 이 섹션 전체 <b>${Number(bd.total_questions)}문항</b> 기준이에요 — 위 점수의 분모(첫 제출
-            <b>${Number(detail.first_total)}문항</b> 기준)와 다를 수 있어요. '응답한 문항만 채점'을 사용했다면 첫 제출
-            당시 실제로 답한 문항 수만 그 분모가 되기 때문이에요. 한 번도 정답을 맞히지 못한 문항(미응답 포함)은
-            '3차 이상'에 포함됩니다.
+            아래 비율은 위 점수와 같은 <b>${Number(bd.total_questions)}문항</b> 기준이에요. '응답한 문항만 채점'을
+            사용해서 첫 제출 당시 답하지 않은 문항이 있었다면, 그 문항은 이 통계에서도 완전히 제외돼요. 한 번도
+            정답을 맞히지 못한 문항(미응답 포함)은 '3차 이상'에 포함됩니다.
           </p>
           <div class="breakdown-grid">
             ${breakdownBlock('first', 'badge-green', '1차에 정답', bd.first_try)}

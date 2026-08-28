@@ -20,17 +20,22 @@ closes).
 This file closes the two gaps none of those touch, both load-bearing for
 this specific chunk's new rendering:
 
-  * The one scenario the chunk's whole "label both explicitly so they don't
-    read as contradictory" UI note exists for: breakdown.total_questions
-    (the section's full answer-key count) actually diverging from
-    first_total (the score ring's own denominator) when the first
-    submission used answered_only to skip some questions. No existing test
-    combines answered_only with the finished-session-detail endpoint --
+  * The one scenario that makes breakdown.total_questions actually narrow
+    down from the section's full answer-key count to a proper subset:
+    when the first submission used answered_only to skip some questions
+    entirely, read_session_detail() (routers/sessions.py) scopes
+    compute_breakdown()'s whole number universe to that SAME answered
+    subset first_total is already computed over, so a question the first
+    submission never even saw is excluded from total_questions and every
+    try-count bucket too -- not just from first_total -- and the two
+    denominators always agree as a result. No existing test combines
+    answered_only with the finished-session-detail endpoint --
     tests/test_answered_only.py never finishes a session or reads
     breakdown, and every breakdown test in test_sessions.py /
     test_sessions_chunk_gaps.py uses ordinary (non-answered_only)
-    submissions where the two denominators happen to always coincide,
-    which would silently hide a regression that collapsed them into one.
+    submissions where the full key set was never narrowed to begin with,
+    which would silently hide a regression that widened breakdown back out
+    to the full key set whenever answered_only actually skipped something.
   * The exact field set GET /sections/{sid}/sessions (the workbook panel's
     new data source) returns per entry -- session_id / finished_at /
     first_score / first_total / first_percent -- which the rewired panel
@@ -81,13 +86,14 @@ def section(client, wb):
 
 
 # ---------------------------------------------------------------------------
-# breakdown.total_questions vs. first_total: the two denominators the new
-# detail screen explicitly labels so they don't read as contradictory.
+# breakdown.total_questions vs. first_total: the two denominators the detail
+# screen renders side by side -- guaranteed to match, since the router scopes
+# breakdown to the SAME answered-subset first_total is already computed over.
 # ---------------------------------------------------------------------------
 
 
-class TestBreakdownDenominatorDivergesFromFirstTotalUnderAnsweredOnly:
-    def test_answered_only_first_submission_leaves_breakdown_on_full_key_count(
+class TestBreakdownDenominatorMatchesFirstTotalUnderAnsweredOnly:
+    def test_answered_only_first_submission_narrows_breakdown_to_answered_subset(
         self, client, section
     ):
         base = client.post(
@@ -112,32 +118,35 @@ class TestBreakdownDenominatorDivergesFromFirstTotalUnderAnsweredOnly:
         assert detail["first_score"] == 1
         assert detail["first_percent"] == 50.0
 
-        # ... while breakdown's denominator is the section's FULL key count
-        # (5), not the narrowed 2 -- the two really do diverge, not just in
-        # theory.
+        # ... and breakdown's denominator now matches it exactly: Q3/4/5,
+        # never even seen by the first submission, are excluded from the
+        # try-count breakdown entirely -- not just from `total` -- so both
+        # denominators land on the same narrowed 2.
         bd = detail["breakdown"]
-        assert bd["total_questions"] == 5
-        assert bd["total_questions"] != detail["first_total"]
+        assert bd["total_questions"] == 2
+        assert bd["total_questions"] == detail["first_total"]
 
-        # Q1 correct on try 1; Q2/3/4/5 never correct in this session at all
-        # (Q2 wrong, Q3-5 never even answered) -> all land in third_plus,
-        # per spec ("never correct" includes "never answered").
+        # Q1 correct on try 1; Q2 wrong (and never retried) -> third_plus.
+        # Q3/4/5 sit outside the answered-only subset entirely now, so they
+        # don't appear in ANY bucket -- not even third_plus -- fully absent
+        # from this session's aggregated data, per spec.
         assert bd["first_try"]["numbers"] == [1]
         assert bd["second_try"]["numbers"] == []
-        assert bd["third_plus"]["numbers"] == [2, 3, 4, 5]
+        assert bd["third_plus"]["numbers"] == [2]
 
-        # Same numerator (the one correct-on-try-1 question), two
-        # legitimately different percentages off two legitimately different
-        # denominators -- exactly the pair the UI labels separately so they
-        # never read as contradictory.
+        # Same numerator (the one correct-on-try-1 question) over the SAME
+        # denominator now -> the two percentages agree exactly, since
+        # breakdown's whole number universe is first_total's own answered
+        # subset.
         assert bd["first_try"]["count"] == 1
-        assert bd["first_try"]["percent"] == 20.0  # 1 / 5 (full section key)
+        assert bd["first_try"]["percent"] == 50.0  # 1 / 2 (answered-only subset)
         assert detail["first_percent"] == 50.0  # 1 / 2 (answered-only total)
 
         # The wrong-answer review list (first_results) still carries all 5
         # questions, including the 3 answered_only left out of `total` --
         # exactly what the wrong-card list needs to show them as unanswered
-        # rather than silently dropping them.
+        # rather than silently dropping them. first_results is untouched by
+        # this narrowing -- only breakdown's own number universe narrows.
         assert len(detail["first_results"]) == 5
         by_num = {r["number"]: r for r in detail["first_results"]}
         assert by_num[1]["status"] == "correct"
@@ -148,11 +157,13 @@ class TestBreakdownDenominatorDivergesFromFirstTotalUnderAnsweredOnly:
     def test_ordinary_full_submission_has_matching_denominators(
         self, client, section
     ):
-        """Sanity check contrasting the divergence test above: with an
+        """Sanity check contrasting the narrowed-subset test above: with an
         ordinary (non-answered_only) first submission that answers every
-        question, first_total and breakdown.total_questions naturally
-        coincide -- confirming the divergence above really does come from
-        answered_only, not from some other, unrelated source."""
+        question, nothing was ever narrowed, so first_total and
+        breakdown.total_questions trivially coincide on the section's full
+        key count -- confirming the narrowing above really is driven by
+        answered_only actually skipping something, not some other,
+        unrelated source."""
         base = client.post(
             "/api/attempts",
             json={

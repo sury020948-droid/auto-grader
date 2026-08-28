@@ -46,9 +46,16 @@ def compute_breakdown(
 ) -> dict[str, Any]:
     """1st/2nd/3rd+-try breakdown across every submission in a session.
 
-    `all_numbers` is the section's FULL answer-key set -- not just the
-    numbers the first submission happened to answer, since answered_only
-    grading can narrow a submission's own results to a subset of the key.
+    `all_numbers` is the universe this breakdown covers -- entirely the
+    caller's choice, not computed here. read_session_detail() (routers/
+    sessions.py) passes the section's FULL answer-key set for an ordinary
+    session, but narrows it to just the numbers the session's FIRST
+    submission actually answered when that submission used answered_only
+    grading to skip some -- the same narrower subset `first_total` is
+    already computed over -- so a number the first submission never even
+    saw is excluded from `total_questions` and every try-count bucket here
+    too, not just from `first_total`. See that router function for exactly
+    how/when it narrows.
     `attempts` is every submission in the session, each exposing its own
     per-question grading as `results: [{"number": ..., "status": ...}, ...]`
     (the shape dal.list_session_attempts already returns); scanned in

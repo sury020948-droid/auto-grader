@@ -85,7 +85,12 @@ SessionDetail { // ...every Session field, plus:
                                "first_try":  { "numbers": [1,2,"..."], "count": 15, "percent": 75.0 },
                                "second_try": { "numbers": [7,9],       "count": 2,  "percent": 10.0 },
                                "third_plus": { "numbers": [3,12,17],   "count": 3,  "percent": 15.0 } } }
-                // breakdown groups every number in the section's full answer key by that
+                // breakdown groups every number in the SAME set first_total is computed
+                // over -- the section's full answer key normally, but narrowed to just the
+                // numbers the FIRST submission actually answered when that submission used
+                // answered_only to skip some (so total_questions always equals first_total;
+                // a number the first submission never saw is excluded here too, permanently
+                // -- even a later retry round answering it doesn't add it back) -- by that
                 // number's own real-try index -- its ordinal position (1st/2nd/3rd+) among
                 // only the submissions where it actually got a non-blank answer, ignoring
                 // rounds it was left unanswered/skipped -- at which it was FIRST answered

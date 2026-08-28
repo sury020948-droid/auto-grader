@@ -48,9 +48,18 @@ that no existing test happens to exercise:
     verbatim value the user typed -- both read directly off
     latest_attempt.results, exactly as the new per-input hint does.
   * An `answered_only` first submission that skips some numbers still
-    surfaces those numbers as retry-worthy in the *next*
-    GET .../session -- results/remaining is never scoped down by
-    answered_only's shrunken total, only the score/percent are.
+    returns those numbers in the *next* GET .../session's own
+    `latest_attempt.results` (status 'unanswered') -- the backend's
+    per-question snapshot is deliberately never scoped down by
+    answered_only's shrunken total, only `total`/`percent` are. This is
+    backend plumbing the quiz screen's own client-side retry-grid render
+    depends on (it needs each number's status/given value to decide what
+    to hide) -- not a claim that these skipped numbers are shown to the
+    user as retry targets. viewSolve() itself (app/static/js/app.js) now
+    filters `status === 'unanswered'` rows out of the retry grid
+    client-side whenever the latest submission was answered_only-narrowed;
+    that filter is unreachable from this Python suite (no JS/DOM runner
+    exists in this repo) and can only be verified by reading app.js.
   * Two independent resume fetches around a retry, mirroring both "retry
     immediately after seeing results" and "come back later" -- since the
     whole point of this chunk is that both are the exact same
@@ -243,15 +252,27 @@ class TestGivenValueForRetryHint:
         assert 1 not in remaining_numbers  # correctly-answered Q1 stays hidden
 
 
-class TestAnsweredOnlyDoesNotHideNumbersFromResume:
-    def test_answered_only_first_submission_still_surfaces_skipped_numbers(
+class TestAnsweredOnlyBackendResultsStayUnfilteredForResume:
+    def test_answered_only_first_submission_leaves_skipped_numbers_in_raw_results(
         self, client, section
     ):
         """A first submission made with answered_only=True shrinks `total`
         to exclude untouched numbers, but the *next* GET .../session must
-        still list those numbers as retry-worthy -- results/remaining is
-        never scoped down by answered_only's shrunken total, only the
-        score percentage is."""
+        still return those numbers in `latest_attempt.results` (status
+        'unanswered') -- the backend's per-question snapshot is never
+        scoped down by answered_only's shrunken total, only the score
+        percentage is.
+
+        This is deliberate backend plumbing the quiz screen's own retry
+        grid needs to know each number's status/given value at all -- it
+        is NOT a claim that these skipped numbers are shown to the user as
+        retry targets. That hiding now happens entirely client-side, in
+        viewSolve()'s own `narrowedByAnsweredOnly` filter (app/static/js/
+        app.js), which drops `status === 'unanswered'` rows from the retry
+        grid whenever the *latest* submission was answered_only-narrowed --
+        unreachable from this Python suite (no JS/DOM runner exists in
+        this repo), so it can only be verified by reading app.js itself.
+        """
         base = client.post(
             "/api/attempts",
             json={
@@ -268,7 +289,10 @@ class TestAnsweredOnlyDoesNotHideNumbersFromResume:
             for r in body["latest_attempt"]["results"]
             if r["status"] != "correct"
         )
-        assert remaining == [2, 3, 4, 5]  # Q3-5 still surfaced despite being outside `total`
+        # Backend contract only -- Q3-5 are still present in the raw
+        # payload despite being outside `total`; the quiz screen itself is
+        # what now hides them from the rendered retry grid (client-side).
+        assert remaining == [2, 3, 4, 5]
 
 
 class TestRepeatedResumeRoundTrips:
